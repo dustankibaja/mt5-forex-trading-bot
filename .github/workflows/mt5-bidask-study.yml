@@ -1,0 +1,58 @@
+name: Research - preregistered EURUSD bid ask study
+
+on:
+  pull_request:
+    paths:
+      - "mt5-ai-bot/src/research/**"
+      - "mt5-ai-bot/scripts/run_bidask_study.py"
+      - "mt5-ai-bot/tests/test_bidask_research.py"
+      - "docs/PREREGISTERED_BIDASK_STUDY_2026-11.md"
+      - ".github/workflows/mt5-bidask-study.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  bidask-study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    defaults:
+      run:
+        working-directory: mt5-ai-bot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install research-only dependencies
+        run: python -m pip install "numpy==1.26.4" "pandas==2.2.2" "pytest==8.2.2"
+      - name: Python syntax validation
+        run: python -m compileall -q src/research scripts/run_bidask_study.py
+      - name: Unit tests with synthetic quotes (no network or broker)
+        run: python -m pytest tests/test_bidask_research.py -q
+      - name: Pre-registered Dukascopy data acquisition and experiment
+        run: python scripts/run_bidask_study.py --out bidask_report
+      - name: Publish research summary
+        if: always()
+        run: |
+          if [ -f bidask_report/report.md ]; then
+            cat bidask_report/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve manifests and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bidask-research
+          path: mt5-ai-bot/bidask_report/
+          if-no-files-found: ignore
+      - name: Add PR comment with results if completed
+        if: success() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            -X POST -f body="$(cat bidask_report/report.md)"
