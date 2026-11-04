@@ -98,7 +98,7 @@ class MT5Adapter:
                 logger.info("Order executed", {"retcode": result.retcode})
                 return MT5Response(request=request, result=result)
 
-            if result.retcode in {mt5.TRADE_RETCODE_REQUOTE, mt5.TRADE_RETCODE_PRICE_CHANGED, mt5.TRADE_RETCODE_PRICE_OFF, mt5.TRADE_RETCODE_TRADE_CONTEXT_BUSY}:
+            if result.retcode in {mt5.TRADE_RETCODE_REQUOTE, mt5.TRADE_RETCODE_PRICE_CHANGED, mt5.TRADE_RETCODE_PRICE_OFF}:
                 logger.warning("Transient error, retrying", {"retcode": result.retcode, "attempt": attempt})
                 time.sleep(self.retry_backoff_seconds)
                 continue
