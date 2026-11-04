@@ -84,7 +84,8 @@ class MT5Adapter:
     def place_market_order(self, request: Dict[str, Any]) -> MT5Response:
         for attempt in range(1, self.retry_attempts + 1):
             check = self.order_check(request)
-            if check is None or check.retcode != mt5.TRADE_RETCODE_DONE:
+            # order_check succeeds with retcode=0; order_send success is TRADE_RETCODE_DONE (10009).
+            if check is None or check.retcode != 0:
                 logger.error("Order check failed", {"retcode": getattr(check, "retcode", None), "comment": getattr(check, "comment", None)})
                 return MT5Response(request=request, result=check)
 
