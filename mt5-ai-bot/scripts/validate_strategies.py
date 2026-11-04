@@ -81,6 +81,19 @@ def format_report(result: dict) -> str:
             )
     lines.extend([
         "",
+        "### How sensitive are returns to trading costs?",
+        "",
+        "| Holdout candidate | Cost scenario | Net return | Profit factor |",
+        "|---|---|---:|---:|",
+    ])
+    for row in result.get("cost_sensitivity", []):
+        pf = "n/a" if row["profit_factor"] is None else f"{row['profit_factor']:.2f}"
+        lines.append(
+            f"| {row['strategy']} | {row['scenario']} | "
+            f"{row['net_return_pct']:+.2f}% | {pf} |"
+        )
+    lines.extend([
+        "",
         f"Validation leader: **{result['validation_leader']}**.",
         f"Approved for profitable demo-candidate development: **{result['approved']}**.",
         "",
@@ -130,6 +143,18 @@ def main() -> None:
         r for r in result["periods"]["holdout"]
         if r["strategy"] == leader["strategy"]
     )
+    # Stress test the historical candidates without tuning to holdout results.
+    cost_cases = {
+        "zero_cost": dict(spread_pips=0, slippage_side_pips=0, commission_roundtrip_per_lot=0),
+        "base": dict(spread_pips=1.2, slippage_side_pips=0.2, commission_roundtrip_per_lot=7),
+        "stress": dict(spread_pips=2.0, slippage_side_pips=0.5, commission_roundtrip_per_lot=10),
+    }
+    result["cost_sensitivity"] = []
+    for candidate in sorted(set(("atr_breakout", leader["strategy"]))):
+        for scenario, costs in cost_cases.items():
+            row = simulate(frame, candidate, *PERIODS["holdout"], **costs)
+            result["cost_sensitivity"].append({"scenario": scenario, **row})
+
     result["approved"] = (
         leader["strategy"]
         if leader["net_return_pct"] > 0 and leader["profit_factor"] is not None
