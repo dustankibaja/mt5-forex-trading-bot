@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT_DIR))
 
 
 import argparse
+import os
 import time
 from datetime import datetime, timezone
 
@@ -25,6 +26,7 @@ from src.execution.risk_manager import RiskLimits, RiskManager
 from src.execution.safeguards import kill_switch_active, is_symbol_tradable, spread_too_high, stops_level_ok
 from src.monitoring.alerts import load_telegram_alert
 from src.monitoring.journal import TradeJournal
+from src.monitoring.status_snapshot import DEFAULT_STATUS_PATH, publish_status
 from src.strategy.atr_breakout import compute_signal
 from src.utils.logging import configure_logging, get_logger
 from src.utils.timeutils import is_in_session, parse_sessions
@@ -108,14 +110,24 @@ def main() -> None:
     configure_logging()
     load_dotenv()
     config = load_config(args.config)
+    status_path = os.environ.get("BOT_STATUS_PATH", str(DEFAULT_STATUS_PATH))
+
+    def heartbeat(state: str) -> None:
+        publish_status(
+            status_path, state=state,
+            dry_run=bool(args.dry_run or config.execution.dry_run),
+            symbols=config.symbols,
+        )
 
     adapter = MT5Adapter(
         retry_attempts=config.execution.retry_attempts,
         retry_backoff_seconds=config.execution.retry_backoff_seconds,
     )
     if not adapter.initialize():
+        heartbeat("offline")
         return
 
+    heartbeat("running")
     alert = load_telegram_alert()
     journal = TradeJournal(path="trades/trade_journal.csv")
     risk_manager = RiskManager(
@@ -134,6 +146,7 @@ def main() -> None:
 
     try:
         while True:
+            heartbeat("paused" if kill_switch_active(config.execution.kill_switch_file) else "running")
             now = datetime.now(timezone.utc)
             risk_manager.reset_if_new_day(now)
 
@@ -278,7 +291,10 @@ def main() -> None:
 
             time.sleep(10)
     finally:
-        adapter.shutdown()
+        try:
+            heartbeat("offline")
+        finally:
+            adapter.shutdown()
 
 
 if __name__ == "__main__":
