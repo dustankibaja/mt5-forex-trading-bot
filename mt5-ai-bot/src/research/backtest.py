@@ -99,6 +99,26 @@ def simulate(
                     }
                     day_count += 1
 
+                    # A next-open entry is exposed to the entire entry bar.
+                    # If a bar spans both levels, assume the stop was first.
+                    p = position
+                    exit_price, reason = None, ""
+                    if direction == 1:
+                        if l[i] <= p["sl"] + offset:
+                            exit_price, reason = p["sl"], "entry_bar_stop"
+                        elif h[i] >= p["tp"] + offset:
+                            exit_price, reason = p["tp"], "entry_bar_target"
+                    else:
+                        if h[i] >= p["sl"] - offset:
+                            exit_price, reason = p["sl"], "entry_bar_stop"
+                        elif l[i] <= p["tp"] - offset:
+                            exit_price, reason = p["tp"], "entry_bar_target"
+                    if exit_price is not None:
+                        pnl = close_position(p, exit_price, i, reason)
+                        bal += pnl
+                        day_pnl += pnl
+                        position = None
+
         marked = bal
         if position is not None:
             p = position
