@@ -1,0 +1,61 @@
+name: MT5 historical strategy validation
+
+on:
+  push:
+    paths:
+      - "mt5-ai-bot/src/research/**"
+      - "mt5-ai-bot/scripts/validate_strategies.py"
+      - "mt5-ai-bot/tests/test_research_validation.py"
+      - ".github/workflows/mt5-strategy-validation.yml"
+  pull_request:
+    paths:
+      - "mt5-ai-bot/src/research/**"
+      - "mt5-ai-bot/scripts/validate_strategies.py"
+      - "mt5-ai-bot/tests/test_research_validation.py"
+      - ".github/workflows/mt5-strategy-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  research-backtest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mt5-ai-bot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install research dependencies
+        run: python -m pip install "numpy==1.26.4" "pandas==2.2.2" "pytest==8.2.2"
+      - name: Compile validation modules
+        run: python -m compileall -q src/research scripts/validate_strategies.py
+      - name: Research unit tests (no MT5 or credentials needed)
+        run: python -m pytest tests/test_research_validation.py -q
+      - name: Download pinned 10-year EURUSD data and compare 4 strategies
+        run: python scripts/validate_strategies.py --out validation_report
+      - name: Publish research summary
+        if: always()
+        run: |
+          if [ -f validation_report/report.md ]; then
+            cat validation_report/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Save reproducible reports
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mt5-research-validation
+          path: mt5-ai-bot/validation_report/
+      - name: Comment research results on this pull request
+        if: success() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            -X POST -f body="$(cat validation_report/report.md)"
