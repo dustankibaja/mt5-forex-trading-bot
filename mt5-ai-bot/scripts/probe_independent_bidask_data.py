@@ -5,6 +5,7 @@ Discovery prints ONLY URLs and metadata. It never downloads bulk data,
 touches a broker, accesses accounts, or claims strategy results.
 """
 import html
+import json
 import re
 import urllib.request
 from urllib.parse import urljoin, urlparse
@@ -62,6 +63,23 @@ def main():
             print(f"JS_SCANNED status={status} bytes={len(raw)}")
         except Exception as error:
             print(f"JS_UNAVAILABLE {type(error).__name__}")
+    try:
+        status, typ, raw = http_get("https://evtradelabs.com/api/data/catalog")
+        catalog = json.loads(raw)
+        print(f"CATALOG_RESPONSE type={type(catalog).__name__} bytes={len(raw)}")
+        print(f"CATALOG_KEYS {list(catalog)[:20] if isinstance(catalog,dict) else 'array'}")
+        entries = catalog.get("files", []) if isinstance(catalog, dict) else catalog
+        print(f"CATALOG_ENTRIES {len(entries) if isinstance(entries,list) else type(entries).__name__}")
+        if isinstance(entries, list):
+            for row in entries:
+                if not isinstance(row, dict):
+                    continue
+                encoded = json.dumps(row, ensure_ascii=False)
+                if ("EURUSD" in encoded and "H1" in encoded and
+                        any(y in encoded for y in ("2022","2023","2024","2025"))):
+                    print(f"CATALOG_EURUSD {encoded[:700]}")
+    except Exception as error:
+        print(f"CATALOG_ERROR {type(error).__name__}: {str(error)[:200]}")
     return 0
 
 
