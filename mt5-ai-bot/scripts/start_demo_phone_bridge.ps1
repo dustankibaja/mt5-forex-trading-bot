@@ -170,7 +170,7 @@ try {
     # Never encode or log anything except the HTTPS hostname and in-memory QR.
     $serveOutput = & tailscale serve status 2>$null | Out-String
     $matchesFound = [regex]::Matches($serveOutput,
-        'https://[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.ts\\.net')
+        'https://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.ts\.net')
     if ($matchesFound.Count -gt 0) {
         $env:EMTIFIZE_PAIR_URL = $matchesFound[0].Value.TrimEnd('/')
         Write-Host 'Opening LOCAL PRIVATE pairing QR window on Windows...' -ForegroundColor Cyan
