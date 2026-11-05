@@ -21,6 +21,7 @@ def publish_status(
     dry_run: bool,
     symbols: list[str],
     now: datetime | None = None,
+    demo_guarded: bool = False,
 ) -> None:
     if state not in VALID_STATES:
         raise ValueError("Invalid engine status")
@@ -33,6 +34,7 @@ def publish_status(
         "state": state,
         "mode": "dry_run" if dry_run else "live_configuration",
         "trading_enabled": state == "running" and not dry_run,
+        "demo_guarded": bool(demo_guarded and dry_run),
         "strategy": "atr_breakout",
         "symbols": safe_symbols,
         "updated_at": current.astimezone(timezone.utc).isoformat(),
@@ -53,7 +55,7 @@ def publish_status(
 def public_snapshot(path: str | Path, *, now: datetime | None = None) -> dict:
     offline = {
         "schema_version": 1, "state": "offline", "mode": "unknown",
-        "trading_enabled": False, "strategy": None,
+        "trading_enabled": False, "demo_guarded": False, "strategy": None,
         "symbols": [], "updated_at": None, "stale": True,
     }
     try:
@@ -71,6 +73,7 @@ def public_snapshot(path: str | Path, *, now: datetime | None = None) -> dict:
             "state": record["state"],
             "mode": record["mode"] if record.get("mode") in ("dry_run", "live_configuration") else "unknown",
             "trading_enabled": bool(record.get("trading_enabled", False)),
+            "demo_guarded": record.get("demo_guarded") is True,
             "strategy": record.get("strategy") if record.get("strategy") == "atr_breakout" else None,
             "symbols": [
                 s for s in record.get("symbols", [])[:20]
