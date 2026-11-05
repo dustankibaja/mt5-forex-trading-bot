@@ -20,15 +20,43 @@ if ($LASTEXITCODE -ne 0) {
     throw "Demo account verification failed. Open MT5 and sign in to a DEMO account."
 }
 
-$token = & $python -c "import secrets; print(secrets.token_urlsafe(48))"
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
-    throw "Could not generate pairing token."
+# Windows DPAPI encrypts stable connection secrets for THIS Windows user.
+# Unlike old releases, restarting the backend must not break saved phones.
+# Never store plaintext pairing secrets or print them in PowerShell.
+$secretDir = Join-Path $botDir 'runtime'
+New-Item -ItemType Directory -Path $secretDir -Force | Out-Null
+function Read-UserProtectedToken([string] $path) {
+    if (-not (Test-Path $path)) { return $null }
+    $cipher = (Get-Content -Path $path -Raw -ErrorAction Stop).Trim()
+    $secure = ConvertTo-SecureString -String $cipher -ErrorAction Stop
+    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try {
+        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+    } finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+    }
+}
+function New-UserProtectedToken([string] $path) {
+    $value = & $python -c "import secrets; print(secrets.token_urlsafe(48))"
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($value)) {
+        throw "Could not generate a private pairing token."
+    }
+    $secure = ConvertTo-SecureString -String $value -AsPlainText -Force
+    $encrypted = ConvertFrom-SecureString -SecureString $secure
+    [System.IO.File]::WriteAllText($path, $encrypted)
+    return $value
+}
+function Get-OrCreateProtectedToken([string] $path) {
+    $value = Read-UserProtectedToken $path
+    if ($value) { return $value }
+    return New-UserProtectedToken $path
+}
+$token = Get-OrCreateProtectedToken (Join-Path $secretDir 'read-token.dpapi')
+$controlToken = Get-OrCreateProtectedToken (Join-Path $secretDir 'control-token.dpapi')
+if ($token.Length -lt 32 -or $controlToken.Length -lt 32 -or $token -eq $controlToken) {
+    throw "Invalid saved secrets. Refusing to start. Never send token files to anyone."
 }
 $env:BOT_STATUS_READ_TOKEN = $token
-$controlToken = & $python -c "import secrets; print(secrets.token_urlsafe(48))"
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($controlToken)) {
-    throw "Could not generate separate demo control token."
-}
 $env:BOT_DEMO_CONTROL_TOKEN = $controlToken
 $env:BOT_STATUS_PATH = (Join-Path $botDir 'runtime\engine_status.json')
 $env:BOT_DEMO_ACCOUNT_PATH = (Join-Path $botDir 'runtime\demo_account.json')
@@ -135,19 +163,28 @@ try {
         Write-Warning 'Demo portfolio not ready. Check MT5 connection and logs; amounts remain hidden in the app.'
     }
     Write-Host ''
-    Write-Host 'READ-ONLY PAIRING TOKEN (PRIVATE — DO NOT SHARE OR SCREENSHOT):' -ForegroundColor Yellow
-    Write-Host $token
-    Write-Host ''
-    Write-Host 'DEMO PAUSE/RESUME CONTROL TOKEN (PRIVATE — DIFFERENT TOKEN):' -ForegroundColor Yellow
-    Write-Host $controlToken
-    Write-Host ''
-    Write-Host 'Default: PAUSED. No market orders are ever sent by this demo dry-run worker.' -ForegroundColor Cyan
-    Write-Host 'To get a private HTTPS address with Tailscale, install/login on PC and Android, then in Administrator PowerShell run:'
-    Write-Host "    tailscale serve --bg $Port"
-    Write-Host '    tailscale serve status'
-    Write-Host 'Open Emtifize AI -> Control center, enter the HTTPS URL and both separate tokens.'
-    Write-Host 'Control scope: pause/resume signal simulation only. All trade orders remain disabled.'
-    Write-Host 'To shut down the worker/API and stop Tailscale Serve, see docs/DEMO_PHONE_PAIRING.md.'
+    Write-Host 'Pairing secrets saved encrypted for THIS Windows user (DPAPI).' -ForegroundColor Green
+    Write-Host 'Restarting this bridge will reuse credentials; phone will auto-reconnect.' -ForegroundColor Green
+    Write-Host 'Default: PAUSED. All market execution stays disabled.' -ForegroundColor Cyan
+    # Serve is already private from prior setup; get ONLY the real hostname.
+    # Never encode or log anything except the HTTPS hostname and in-memory QR.
+    $serveOutput = & tailscale serve status 2>$null | Out-String
+    $matchesFound = [regex]::Matches($serveOutput,
+        'https://[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.ts\\.net')
+    if ($matchesFound.Count -gt 0) {
+        $env:EMTIFIZE_PAIR_URL = $matchesFound[0].Value.TrimEnd('/')
+        Write-Host 'Opening LOCAL PRIVATE pairing QR window on Windows...' -ForegroundColor Cyan
+        $quotedQrScript = '"' + (Join-Path $PSScriptRoot 'show_pairing_qr.py') + '"'
+        Start-Process -FilePath $python -ArgumentList $quotedQrScript -WorkingDirectory $botDir
+        Write-Host 'On Android: tap Scan PC QR -> scan the private window once -> Connect.'
+        Write-Host 'Close the QR window after pairing. Never share its picture.'
+    } else {
+        Write-Warning 'Tailscale Serve hostname not found. Enable Serve and retry QR generation.'
+        Write-Host 'Manual pairing is still possible using the encrypted saved token files.'
+    }
+    Write-Host 'Phone access requires the Windows PC, MT5 and Tailscale to stay online.'
+    Write-Host 'Controls: PAUSE/RESUME DEMO signals only; never orders.'
+    Write-Host 'To rotate saved credentials, run scripts/rotate_pairing.ps1 after stopping bridge.'
 } catch {
     if ($api -and -not $api.HasExited) { Stop-Process -Id $api.Id -Force -ErrorAction SilentlyContinue }
     if ($worker -and -not $worker.HasExited) { Stop-Process -Id $worker.Id -Force -ErrorAction SilentlyContinue }
