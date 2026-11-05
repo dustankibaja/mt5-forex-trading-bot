@@ -125,6 +125,14 @@ def main() -> None:
     configure_logging()
     load_dotenv()
     config = load_config(args.config)
+    # HARD RELEASE GATE: the legacy unattended worker may never place orders,
+    # even if someone changes config.yaml or omits --dry-run by mistake.
+    # A future profitable strategy needs a separately audited executable.
+    if not (args.dry_run and args.require_demo and config.execution.dry_run):
+        raise SystemExit(
+            "HARD_LOCK: unattended strategy worker is DEMO dry-run ONLY. "
+            "Use --dry-run --require-demo with execution.dry_run=true."
+        )
     status_path = os.environ.get("BOT_STATUS_PATH", str(DEFAULT_STATUS_PATH))
     demo_path = os.environ.get("BOT_DEMO_ACCOUNT_PATH", str(DEFAULT_DEMO_PATH))
     remote_pause_path = os.environ.get("BOT_REMOTE_PAUSE_PATH", str(DEFAULT_PAUSE_PATH))
