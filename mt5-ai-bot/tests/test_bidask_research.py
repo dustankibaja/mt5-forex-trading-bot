@@ -5,7 +5,7 @@ import struct
 import pandas as pd
 import pytest
 
-from src.research.duka_bidask import parse_month
+from src.research.duka_bidask import parse_month, download_month
 from src.research.regime_signals import CANDIDATES, indicators, signal
 from src.research.bidask_backtest import simulate
 from scripts.run_bidask_study import qualified
@@ -71,3 +71,16 @@ def test_qualification_requires_real_trade_sample_and_positive_net():
     assert not qualified({**base, "trades": 5})
     assert not qualified({**base, "net_return_pct": -0.01})
     assert not qualified({**base, "profit_factor": 0.99})
+
+def test_cached_bidask_file_is_reused_without_network(monkeypatch, tmp_path):
+    cached = tmp_path / "EURUSD-2025-01-bid.bi5"
+    cached.write_bytes(month_bytes())
+
+    def forbidden_network(*args, **kwargs):
+        raise AssertionError("Valid cache should not access network")
+
+    from src.research import duka_bidask
+    monkeypatch.setattr(duka_bidask.urllib.request, "urlopen", forbidden_network)
+    raw, url = download_month(2025, 1, "bid", cache_dir=tmp_path)
+    assert raw == cached.read_bytes()
+    assert "BID_candles_hour_1.bi5" in url
