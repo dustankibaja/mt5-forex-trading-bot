@@ -1,8 +1,6 @@
-"""Display a PRIVATE local QR code for Emtifize AI; never print secrets.
+"""Display an in-memory PRIVATE pairing QR; never save/print credentials.
 
-Requires qrcode[pil] (in requirements.txt). Payload contains both private
-tokens and grants monitoring + DEMO simulation control. Treat the QR like
-credentials. The PNG is a local TEMPORARY file: delete after scanning.
+The visible QR grants demo controls. Close the local window after pairing.
 """
 from __future__ import annotations
 
@@ -10,7 +8,6 @@ import json
 import os
 import re
 import sys
-from pathlib import Path
 from urllib.parse import urlsplit
 
 import qrcode
@@ -45,14 +42,30 @@ def main() -> int:
         print(f"QR not created: {exc}", file=sys.stderr)
         return 2
 
-    output = Path("runtime/pairing-PRIVATE-DELETE-AFTER-SCAN.png")
-    output.parent.mkdir(parents=True, exist_ok=True)
-    image = qrcode.make(payload)
-    image.save(output)
-    print("Private QR ready. Do NOT screenshot, email, upload or share it.")
-    print("Scan using Emtifize AI on YOUR phone and close/delete it afterwards.")
-    if sys.platform == "win32":
-        os.startfile(str(output.resolve()))  # nosec B606: local PNG viewer only
+    # Keep the credential-bearing QR ONLY in this local window's memory.
+    # It is never written to a file, terminal, log or cloud service.
+    import tkinter as tk
+    from PIL import ImageTk
+
+    root = tk.Tk()
+    root.title("Emtifize AI - PRIVATE PAIRING")
+    root.configure(bg="#111A2B")
+    root.resizable(False, False)
+    title = tk.Label(root, text="Scan once with Emtifize AI",
+                     fg="white", bg="#111A2B", font=("Segoe UI", 16, "bold"))
+    title.pack(padx=20, pady=(18, 8))
+    qr_image = qrcode.make(payload).convert("RGB").resize((390, 390))
+    photo = ImageTk.PhotoImage(qr_image, master=root)
+    qr_label = tk.Label(root, image=photo, borderwidth=0)
+    qr_label.image = photo
+    qr_label.pack(padx=22, pady=8)
+    note = tk.Label(root, text="PRIVATE: this QR grants demo controls.\n"
+                    "Never photograph, share, or upload it. Close after scanning.",
+                    fg="#FFCC88", bg="#111A2B", font=("Segoe UI", 10))
+    note.pack(padx=20, pady=(8, 12))
+    tk.Button(root, text="Close after pairing", command=root.destroy,
+              width=25).pack(pady=(0, 20))
+    root.mainloop()
     return 0
 
 
