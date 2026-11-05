@@ -27,5 +27,17 @@ jobs:
           python -m pip install -r requirements.txt
       - name: Validate Python syntax
         run: python -m compileall -q src scripts tests
+      - name: Validate PowerShell onboarding script syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path scripts/start_demo_phone_bridge.ps1), [ref]$tokens, [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
       - name: Run unit tests (no broker credentials)
         run: python -m pytest tests -q
