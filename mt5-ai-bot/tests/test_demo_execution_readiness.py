@@ -27,7 +27,7 @@ class FakeMT5:
         return SimpleNamespace(trade_mode=self.mode,
                                trade_allowed=self.allowed, trade_expert=self.allowed,
                                balance=self.balance, margin_free=self.balance * 0.95,
-                               currency="USD", login=5058422626,
+                               currency="USD", login=111111111,
                                password="NEVER_EXPORT")
 
     def symbol_info(self, symbol):
@@ -64,7 +64,7 @@ def test_healthy_demo_allows_mechanical_review_without_orders():
     assert result.estimated_min_lot_stop_loss == 2.0
     assert api.order_calls == 0
     visible = str(result.public_report())
-    assert "5058422626" not in visible
+    assert "111111111" not in visible
     assert "NEVER_EXPORT" not in visible
     assert result.public_report()["order_execution_enabled"] is False
 
