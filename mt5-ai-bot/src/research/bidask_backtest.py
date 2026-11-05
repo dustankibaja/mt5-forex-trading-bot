@@ -90,6 +90,9 @@ def simulate(
         if new_day != day:
             day, day_pnl, day_count = new_day, 0.0, 0
 
+        # An existing position can exit at any point *inside* this bar.
+        # We cannot then open a new trade at this bar's already-passed OPEN.
+        began_with_position = pos is not None
         if pos is not None:
             exit_price, why = exit_if_hit(pos, i)
             if exit_price is None and i - pos["opened"] >= 48:
@@ -104,7 +107,7 @@ def simulate(
 
         # Strictly signal on i-1, execute on opening quote of i.
         if (
-            pos is None and i > begin and i < finish - 1 and cash > 0
+            pos is None and not began_with_position and i > begin and i < finish - 1 and cash > 0
             and day_count < 3 and day_pnl > -cash * 0.02
         ):
             spread = (values["ask_open"][i] - values["bid_open"][i]) / PIP
