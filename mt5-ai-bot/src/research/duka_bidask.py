@@ -8,8 +8,10 @@ from __future__ import annotations
 import hashlib
 import io
 import lzma
+import os
 import struct
 import time
+from pathlib import Path
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -51,10 +53,22 @@ def parse_month(raw: bytes, year: int, month: int, side: str) -> pd.DataFrame:
     return df.add_prefix(side + "_")
 
 
-def download_month(year: int, month: int, side: str) -> tuple[bytes, str]:
+def download_month(year: int, month: int, side: str, cache_dir: Path | None = None) -> tuple[bytes, str]:
     url = f"{BASE}/{year}/{month-1:02d}/{side.upper()}_candles_hour_1.bi5"
+    cache_path = None
+    if cache_dir is not None:
+        cache_dir = Path(cache_dir)
+        cache_path = cache_dir / f"EURUSD-{year}-{month:02d}-{side}.bi5"
+        if cache_path.is_file():
+            raw = cache_path.read_bytes()
+            try:
+                parse_month(raw, year, month, side)  # Verify every cached file.
+                return raw, url
+            except (lzma.LZMAError, ValueError, EOFError):
+                cache_path.unlink(missing_ok=True)  # Corrupt cache must not be used.
+
     last_error = None
-    for retry in range(4):
+    for retry in range(7):
         try:
             request = urllib.request.Request(
                 url, headers={"User-Agent": "MT5-AI-Bot-academic-backtest/1.0"}
@@ -63,12 +77,24 @@ def download_month(year: int, month: int, side: str) -> tuple[bytes, str]:
                 content = reply.read()
             if not content:
                 raise ValueError(f"Empty reply: {url}")
+            # A successful HTTP response is not enough: validate binary
+            # structure and OHLC invariants before trusting/persisting.
+            parse_month(content, year, month, side)
+            if cache_path is not None:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = cache_path.with_suffix(".tmp")
+                tmp.write_bytes(content)
+                os.replace(tmp, cache_path)
             return content, url
         except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError) as ex:
             last_error = ex
             if isinstance(ex, urllib.error.HTTPError) and ex.code == 404:
                 raise RuntimeError(f"Missing data month {url}") from ex
-            time.sleep((retry + 1) * 3)
+            if retry == 6:
+                break
+            # Respect temporary 503 / rate limiting without hammering
+            # Dukascopy. Resumable local cache preserves completed months.
+            time.sleep(min(10 * 2 ** retry, 90))
     raise RuntimeError(f"Could not download {url}: {last_error}")
 
 
@@ -81,13 +107,13 @@ def month_iter(start_year=2022, start_month=4, end_year=2026, end_month=9):
             month, year = 1, year + 1
 
 
-def load_historical(start=(2022, 4), end=(2026, 9)):
+def load_historical(start=(2022, 4), end=(2026, 9), cache_dir: Path | None = Path("data/dukascopy_cache")):
     pieces = []
     manifest = []
     for year, month in month_iter(*start, *end):
         sides = {}
         for side in ("bid", "ask"):
-            raw, url = download_month(year, month, side)
+            raw, url = download_month(year, month, side, cache_dir=cache_dir)
             frame = parse_month(raw, year, month, side)
             sides[side] = frame
             manifest.append({
@@ -96,7 +122,7 @@ def load_historical(start=(2022, 4), end=(2026, 9)):
                 "candles": len(frame),
             })
             # Dukascopy throttles frequent requests.
-            time.sleep(0.35)
+            time.sleep(1.0)
         joined = sides["bid"].join(sides["ask"], how="inner", validate="one_to_one")
         if joined.empty:
             raise ValueError(f"No aligned bid/ask bars for {year}-{month:02d}")
@@ -108,7 +134,7 @@ def load_historical(start=(2022, 4), end=(2026, 9)):
             if (joined[f"ask_{suffix}"] < joined[f"bid_{suffix}"]).any():
                 raise ValueError(f"Negative bid/ask spread in {year}-{month:02d}")
         pieces.append(joined)
-        print(f"Downloaded {year}-{month:02d}: {len(joined)} aligned candles", flush=True)
+        print(f"Verified {year}-{month:02d}: {len(joined)} aligned candles", flush=True)
 
     df = pd.concat(pieces).sort_index()
     if df.index.has_duplicates or not df.index.is_monotonic_increasing:
