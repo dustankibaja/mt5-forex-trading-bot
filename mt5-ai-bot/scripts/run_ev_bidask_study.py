@@ -72,11 +72,11 @@ def main():
     ]:
         for row in rows:
             pf = row["profit_factor"]
+            pf_str = f"{pf:.3f}" if pf is not None else "n/a"
             lines.append(
                 f"| {window} | {row['hypothesis']} | {row['trades']} | "
                 f"{row['net_return_pct']:+.2f}% | "
-                f"{pf:.3f}" if pf is not None else "n/a"
-                f"{row['max_marked_drawdown_pct']:.2f}% |"
+                f"{pf_str} | {row['max_marked_drawdown_pct']:.2f}% |"
             )
     lines.append("")
     lines.append("**2025 validation-qualified:** " + (", ".join(allowed) or "NONE"))
