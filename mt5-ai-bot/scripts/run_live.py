@@ -28,6 +28,7 @@ from src.monitoring.alerts import load_telegram_alert
 from src.monitoring.journal import TradeJournal
 from src.monitoring.status_snapshot import DEFAULT_STATUS_PATH, publish_status
 from src.monitoring.demo_account_snapshot import DEFAULT_DEMO_PATH, capture_demo_snapshot, invalidate_demo_snapshot
+from src.monitoring.demo_controls import DEFAULT_PAUSE_PATH, demo_paused
 from src.strategy.atr_breakout import compute_signal
 from src.utils.logging import configure_logging, get_logger
 from src.utils.timeutils import is_in_session, parse_sessions
@@ -126,6 +127,7 @@ def main() -> None:
     config = load_config(args.config)
     status_path = os.environ.get("BOT_STATUS_PATH", str(DEFAULT_STATUS_PATH))
     demo_path = os.environ.get("BOT_DEMO_ACCOUNT_PATH", str(DEFAULT_DEMO_PATH))
+    remote_pause_path = os.environ.get("BOT_REMOTE_PAUSE_PATH", str(DEFAULT_PAUSE_PATH))
     demo_only_readback = bool(args.require_demo and (args.dry_run or config.execution.dry_run))
     # Never allow an old demo snapshot to remain visible after a restart.
     invalidate_demo_snapshot(demo_path)
@@ -135,6 +137,7 @@ def main() -> None:
             status_path, state=state,
             dry_run=bool(args.dry_run or config.execution.dry_run),
             symbols=config.symbols,
+            demo_guarded=demo_only_readback,
         )
 
     adapter = MT5Adapter(
@@ -175,15 +178,17 @@ def main() -> None:
                 heartbeat("offline")
                 logger.error("DEMO account disconnected or changed; engine stopped")
                 break
-            heartbeat("paused" if kill_switch_active(config.execution.kill_switch_file) else "running")
+            manual_pause = kill_switch_active(config.execution.kill_switch_file)
+            remote_pause = demo_paused(remote_pause_path)
+            heartbeat("paused" if manual_pause or remote_pause else "running")
             now = datetime.now(timezone.utc)
             if demo_only_readback:
                 if not capture_demo_snapshot(mt5, demo_path, now=now):
                     logger.warning("DEMO account snapshot unavailable; app values hidden")
             risk_manager.reset_if_new_day(now)
 
-            if kill_switch_active(config.execution.kill_switch_file):
-                logger.warning("Kill switch active. No new trades.")
+            if manual_pause or remote_pause:
+                logger.info("Demo signals paused. No new trades or dry-run signals.")
                 time.sleep(5)
                 continue
 

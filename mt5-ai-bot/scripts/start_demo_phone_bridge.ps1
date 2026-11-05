@@ -25,8 +25,18 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
     throw "Could not generate pairing token."
 }
 $env:BOT_STATUS_READ_TOKEN = $token
+$controlToken = & $python -c "import secrets; print(secrets.token_urlsafe(48))"
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($controlToken)) {
+    throw "Could not generate separate demo control token."
+}
+$env:BOT_DEMO_CONTROL_TOKEN = $controlToken
 $env:BOT_STATUS_PATH = (Join-Path $botDir 'runtime\engine_status.json')
 $env:BOT_DEMO_ACCOUNT_PATH = (Join-Path $botDir 'runtime\demo_account.json')
+$env:BOT_REMOTE_PAUSE_PATH = (Join-Path $botDir 'runtime\remote_pause.flag')
+# Start fail-safe: DEMO signal simulation stays paused until explicit
+# separate-token phone RESUME. This never modifies KILL_SWITCH.
+& $python -c "from src.monitoring.demo_controls import pause_demo; pause_demo()"
+if ($LASTEXITCODE -ne 0) { throw "Could not set safe default PAUSED mode." }
 
 New-Item -ItemType Directory -Path (Join-Path $botDir 'runtime') -Force | Out-Null
 $logDir = Join-Path $botDir 'runtime\logs'
@@ -125,14 +135,18 @@ try {
         Write-Warning 'Demo portfolio not ready. Check MT5 connection and logs; amounts remain hidden in the app.'
     }
     Write-Host ''
-    Write-Host 'PHONE PAIRING TOKEN (PRIVATE — DO NOT SHARE OR SCREENSHOT):' -ForegroundColor Yellow
+    Write-Host 'READ-ONLY PAIRING TOKEN (PRIVATE — DO NOT SHARE OR SCREENSHOT):' -ForegroundColor Yellow
     Write-Host $token
     Write-Host ''
+    Write-Host 'DEMO PAUSE/RESUME CONTROL TOKEN (PRIVATE — DIFFERENT TOKEN):' -ForegroundColor Yellow
+    Write-Host $controlToken
+    Write-Host ''
+    Write-Host 'Default: PAUSED. No market orders are ever sent by this demo dry-run worker.' -ForegroundColor Cyan
     Write-Host 'To get a private HTTPS address with Tailscale, install/login on PC and Android, then in Administrator PowerShell run:'
     Write-Host "    tailscale serve --bg $Port"
     Write-Host '    tailscale serve status'
-    Write-Host 'Open Emtifize AI Demo -> DEMO DATA ONLY -> Trading engine, then enter the HTTPS URL and token.'
-    Write-Host 'Updated Android app can view read-only DEMO balances/positions. Trading remains disabled.'
+    Write-Host 'Open Emtifize AI -> Control center, enter the HTTPS URL and both separate tokens.'
+    Write-Host 'Control scope: pause/resume signal simulation only. All trade orders remain disabled.'
     Write-Host 'To shut down the worker/API and stop Tailscale Serve, see docs/DEMO_PHONE_PAIRING.md.'
 } catch {
     if ($api -and -not $api.HasExited) { Stop-Process -Id $api.Id -Force -ErrorAction SilentlyContinue }
