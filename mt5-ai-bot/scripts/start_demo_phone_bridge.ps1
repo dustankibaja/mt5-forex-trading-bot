@@ -48,16 +48,55 @@ try {
         -RedirectStandardOutput (Join-Path $logDir 'demo-worker-out.log') `
         -RedirectStandardError (Join-Path $logDir 'demo-worker-error.log')
 
-    Start-Sleep -Seconds 4
-    $api.Refresh()
-    $worker.Refresh()
-    if ($api.HasExited -or $worker.HasExited) {
-        throw "API or worker exited early. Check log files under runtime\logs."
-    }
-    $response = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/status" `
-        -Headers @{Authorization = "Bearer $token"} -TimeoutSec 6
-    if ($response.stale -or $response.mode -ne 'dry_run') {
-        throw "Engine heartbeat was not fresh dry-run; refusing phone pairing."
+    # Importing pandas and initializing MT5 may take significantly longer
+    # than four seconds on Windows. Poll for a current-session heartbeat.
+    $waitStartedAt = [DateTimeOffset]::UtcNow
+    $deadline = $waitStartedAt.AddSeconds(90)
+    $response = $null
+    $lastError = $null
+    $ready = $false
+    Write-Host 'Waiting for the demo worker and its first fresh heartbeat...' -ForegroundColor Cyan
+    do {
+        Start-Sleep -Seconds 2
+        $api.Refresh()
+        $worker.Refresh()
+        if ($api.HasExited -or $worker.HasExited) {
+            throw "API or worker exited while starting. Check runtime\logs\demo-*-error.log and logs\bot.log."
+        }
+        try {
+            $response = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/status" `
+                -Headers @{Authorization = "Bearer $token"} -TimeoutSec 3
+            $lastError = $null
+            $observedTime = [DateTimeOffset]::MinValue
+            if (-not [string]::IsNullOrWhiteSpace($response.updated_at)) {
+                $observedTime = [DateTimeOffset]::Parse(
+                    $response.updated_at,
+                    [System.Globalization.CultureInfo]::InvariantCulture
+                )
+            }
+            $ready = (
+                $response.stale -eq $false -and
+                $response.mode -eq 'dry_run' -and
+                $response.trading_enabled -eq $false -and
+                $response.state -in @('running', 'paused') -and
+                $observedTime -ge $waitStartedAt
+            )
+            if ($response.mode -eq 'live_configuration') {
+                throw "SAFETY_STOP: unexpected live configuration; refusing phone pairing."
+            }
+        } catch {
+            if ($_.Exception.Message -like '*SAFETY_STOP*') { throw }
+            $lastError = $_.Exception.Message
+        }
+    } while (-not $ready -and [DateTimeOffset]::UtcNow -lt $deadline)
+
+    if (-not $ready) {
+        $stateSummary = if ($null -eq $response) {
+            'No status response'
+        } else {
+            "state=$($response.state) mode=$($response.mode) stale=$($response.stale) updated_at=$($response.updated_at)"
+        }
+        throw "No fresh demo-only heartbeat after 90 seconds ($stateSummary). Check runtime\logs\demo-worker-error.log and logs\bot.log. Last API error: $lastError"
     }
 
     @(@{process = 'api'; pid = $api.Id}, @{process = 'worker'; pid = $worker.Id}) |
