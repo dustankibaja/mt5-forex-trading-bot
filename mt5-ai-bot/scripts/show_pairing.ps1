@@ -1,6 +1,6 @@
 # Reopen a private QR window without stopping or restarting the bot.
 # Decrypts DPAPI keys for THIS Windows user; never prints or writes plaintext.
-param([switch]$NoQr)
+param([switch]$NoQr, [switch]$ShowTokens)
 
 $ErrorActionPreference = 'Stop'
 $botDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -29,6 +29,11 @@ $env:BOT_STATUS_READ_TOKEN = $keys.read_token
 $env:BOT_DEMO_CONTROL_TOKEN = $keys.control_token
 
 Write-Host 'Private pairing host:' $env:EMTIFIZE_PAIR_URL -ForegroundColor Cyan
+if ($ShowTokens) {
+    Write-Warning 'THE FOLLOWING ARE PASSWORDS. Do not share them, even with ChatGPT.'
+    Write-Host 'Read-only token: ' $keys.read_token -ForegroundColor Yellow
+    Write-Host 'Demo-control token: ' $keys.control_token -ForegroundColor Yellow
+}
 Write-Host 'The QR contains the private pairing secrets. Scan it directly on your phone; never share it.' -ForegroundColor Yellow
 if (-not $NoQr) {
     $scriptPath = '"' + (Join-Path $PSScriptRoot 'show_pairing_qr.py') + '"'
