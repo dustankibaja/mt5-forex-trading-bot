@@ -34,14 +34,16 @@ New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $api = $null
 $worker = $null
 try {
+    $quotedApiPath = '"' + (Join-Path $PSScriptRoot 'serve_status.py') + '"'
+    $quotedWorkerPath = '"' + (Join-Path $PSScriptRoot 'run_live.py') + '"'
     $api = Start-Process -FilePath $python `
-        -ArgumentList @((Join-Path $PSScriptRoot 'serve_status.py'), '--port', "$Port") `
+        -ArgumentList "$quotedApiPath --port $Port" `
         -WorkingDirectory $botDir -PassThru `
         -RedirectStandardOutput (Join-Path $logDir 'demo-api-out.log') `
         -RedirectStandardError (Join-Path $logDir 'demo-api-error.log')
 
     $worker = Start-Process -FilePath $python `
-        -ArgumentList @((Join-Path $PSScriptRoot 'run_live.py'), '--dry-run', '--require-demo') `
+        -ArgumentList "$quotedWorkerPath --dry-run --require-demo" `
         -WorkingDirectory $botDir -PassThru `
         -RedirectStandardOutput (Join-Path $logDir 'demo-worker-out.log') `
         -RedirectStandardError (Join-Path $logDir 'demo-worker-error.log')
