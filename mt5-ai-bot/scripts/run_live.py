@@ -27,6 +27,7 @@ from src.execution.safeguards import kill_switch_active, is_symbol_tradable, spr
 from src.monitoring.alerts import load_telegram_alert
 from src.monitoring.journal import TradeJournal
 from src.monitoring.status_snapshot import DEFAULT_STATUS_PATH, publish_status
+from src.monitoring.demo_account_snapshot import DEFAULT_DEMO_PATH, capture_demo_snapshot, invalidate_demo_snapshot
 from src.strategy.atr_breakout import compute_signal
 from src.utils.logging import configure_logging, get_logger
 from src.utils.timeutils import is_in_session, parse_sessions
@@ -124,6 +125,10 @@ def main() -> None:
     load_dotenv()
     config = load_config(args.config)
     status_path = os.environ.get("BOT_STATUS_PATH", str(DEFAULT_STATUS_PATH))
+    demo_path = os.environ.get("BOT_DEMO_ACCOUNT_PATH", str(DEFAULT_DEMO_PATH))
+    demo_only_readback = bool(args.require_demo and (args.dry_run or config.execution.dry_run))
+    # Never allow an old demo snapshot to remain visible after a restart.
+    invalidate_demo_snapshot(demo_path)
 
     def heartbeat(state: str) -> None:
         publish_status(
@@ -166,11 +171,15 @@ def main() -> None:
     try:
         while True:
             if args.require_demo and not demo_account_connected():
+                invalidate_demo_snapshot(demo_path)
                 heartbeat("offline")
                 logger.error("DEMO account disconnected or changed; engine stopped")
                 break
             heartbeat("paused" if kill_switch_active(config.execution.kill_switch_file) else "running")
             now = datetime.now(timezone.utc)
+            if demo_only_readback:
+                if not capture_demo_snapshot(mt5, demo_path, now=now):
+                    logger.warning("DEMO account snapshot unavailable; app values hidden")
             risk_manager.reset_if_new_day(now)
 
             if kill_switch_active(config.execution.kill_switch_file):
@@ -315,6 +324,7 @@ def main() -> None:
             time.sleep(10)
     finally:
         try:
+            invalidate_demo_snapshot(demo_path)
             heartbeat("offline")
         finally:
             adapter.shutdown()
