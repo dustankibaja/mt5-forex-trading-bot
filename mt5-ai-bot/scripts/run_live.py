@@ -78,6 +78,18 @@ def refresh_account_risk(now: datetime, risk_manager: RiskManager) -> bool:
     return True
 
 
+def demo_account_connected() -> bool:
+    """Recheck identity: never run a demo-only worker against funded MT5."""
+    terminal = mt5.terminal_info()
+    account = mt5.account_info()
+    return bool(
+        terminal is not None
+        and getattr(terminal, "connected", False)
+        and account is not None
+        and getattr(account, "trade_mode", None) == mt5.ACCOUNT_TRADE_MODE_DEMO
+    )
+
+
 TIMEFRAME_MAP = {
     "M1": mt5.TIMEFRAME_M1,
     "M5": mt5.TIMEFRAME_M5,
@@ -105,6 +117,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--require-demo", action="store_true", help="Refuse non-demo MT5 accounts")
     args = parser.parse_args()
 
     configure_logging()
@@ -127,6 +140,12 @@ def main() -> None:
         heartbeat("offline")
         return
 
+    if args.require_demo and not demo_account_connected():
+        heartbeat("offline")
+        logger.error("DEMO account required; engine will not run")
+        adapter.shutdown()
+        return
+
     heartbeat("running")
     alert = load_telegram_alert()
     journal = TradeJournal(path="trades/trade_journal.csv")
@@ -146,6 +165,10 @@ def main() -> None:
 
     try:
         while True:
+            if args.require_demo and not demo_account_connected():
+                heartbeat("offline")
+                logger.error("DEMO account disconnected or changed; engine stopped")
+                break
             heartbeat("paused" if kill_switch_active(config.execution.kill_switch_file) else "running")
             now = datetime.now(timezone.utc)
             risk_manager.reset_if_new_day(now)
