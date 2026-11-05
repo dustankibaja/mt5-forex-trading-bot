@@ -11,3 +11,6 @@ pyarrow==16.1.0; python_version < "3.13"
 
 
 pytest==8.2.2
+
+# Local scan-to-pair QR generator (no cloud service)
+qrcode[pil]==8.2
