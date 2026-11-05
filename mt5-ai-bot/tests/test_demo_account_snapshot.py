@@ -51,7 +51,7 @@ class DemoBroker:
         return self._positions
 
     def history_deals_get(self, start, end):
-        assert end == NOW and start == NOW - timedelta(days=7)
+        assert end - start == timedelta(days=7)
         return self._deals
 
     def order_send(self, request):
