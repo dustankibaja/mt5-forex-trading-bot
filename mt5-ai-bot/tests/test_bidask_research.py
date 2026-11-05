@@ -84,3 +84,27 @@ def test_cached_bidask_file_is_reused_without_network(monkeypatch, tmp_path):
     raw, url = download_month(2025, 1, "bid", cache_dir=tmp_path)
     assert raw == cached.read_bytes()
     assert "BID_candles_hour_1.bi5" in url
+
+
+def test_intrabar_exit_does_not_reenter_at_same_bar_open(monkeypatch):
+    """An exit during bar 214 cannot allow a backdated entry at its open."""
+    from src.research import bidask_backtest
+
+    side = fixed_side(count=300)
+    # Trigger stop on bar 214 after the original position was carried over.
+    side.loc[side.index[214], "bid_low"] = 1.09850
+    mid = indicators(side)
+    calls = []
+
+    def synthetic_signal(frame, completed_bar_index, candidate):
+        calls.append(completed_bar_index)
+        # First trade: signal on close of bar 211, enter open 212.
+        # Second signal would have been used to illegitimately re-enter
+        # at open 214 AFTER observing the exit inside bar 214.
+        return 1 if completed_bar_index in (211, 213) else 0
+
+    monkeypatch.setattr(bidask_backtest, "signal", synthetic_signal)
+    result = simulate(side, mid, "session_breakout", "2025-01-01", "2025-01-13")
+    assert result["trades"] == 1
+    assert 211 in calls
+    assert 213 not in calls
