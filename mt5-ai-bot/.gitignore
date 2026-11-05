@@ -8,3 +8,7 @@ logs/
 trades/
 data/processed/
 KILL_SWITCH
+
+# Local MT5 account snapshots, status, process IDs and private runtime logs.
+# Never commit demo broker balances/positions or pairing metadata.
+runtime/

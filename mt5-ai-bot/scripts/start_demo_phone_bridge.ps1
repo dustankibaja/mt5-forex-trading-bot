@@ -26,6 +26,7 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
 }
 $env:BOT_STATUS_READ_TOKEN = $token
 $env:BOT_STATUS_PATH = (Join-Path $botDir 'runtime\engine_status.json')
+$env:BOT_DEMO_ACCOUNT_PATH = (Join-Path $botDir 'runtime\demo_account.json')
 
 New-Item -ItemType Directory -Path (Join-Path $botDir 'runtime') -Force | Out-Null
 $logDir = Join-Path $botDir 'runtime\logs'
@@ -105,6 +106,24 @@ try {
     Write-Host ''
     Write-Host 'SUCCESS: MT5 DEMO -> Python dry-run worker -> authenticated local status API' -ForegroundColor Green
     Write-Host "API state: $($response.state); mode: $($response.mode); last heartbeat: $($response.updated_at)"
+    $demoReady = $false
+    for ($attempt = 0; $attempt -lt 10 -and -not $demoReady; $attempt++) {
+        try {
+            $demo = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/demo-account" `
+                -Headers @{Authorization = "Bearer $token"} -TimeoutSec 4
+            $demoReady = ($demo.available -eq $true -and
+                          $demo.stale -eq $false -and
+                          $demo.account_type -eq 'demo')
+        } catch {
+            Write-Warning "Broker demo account readback not ready yet."
+        }
+        if (-not $demoReady) { Start-Sleep -Seconds 2 }
+    }
+    if ($demoReady) {
+        Write-Host 'READ-ONLY DEMO PORTFOLIO: Available (balance/equity/positions/history)' -ForegroundColor Green
+    } else {
+        Write-Warning 'Demo portfolio not ready. Check MT5 connection and logs; amounts remain hidden in the app.'
+    }
     Write-Host ''
     Write-Host 'PHONE PAIRING TOKEN (PRIVATE — DO NOT SHARE OR SCREENSHOT):' -ForegroundColor Yellow
     Write-Host $token
@@ -113,7 +132,7 @@ try {
     Write-Host "    tailscale serve --bg $Port"
     Write-Host '    tailscale serve status'
     Write-Host 'Open Emtifize AI Demo -> DEMO DATA ONLY -> Trading engine, then enter the HTTPS URL and token.'
-    Write-Host 'This v1 app can view engine status, not place trades or show broker balances.'
+    Write-Host 'Updated Android app can view read-only DEMO balances/positions. Trading remains disabled.'
     Write-Host 'To shut down the worker/API and stop Tailscale Serve, see docs/DEMO_PHONE_PAIRING.md.'
 } catch {
     if ($api -and -not $api.HasExited) { Stop-Process -Id $api.Id -Force -ErrorAction SilentlyContinue }

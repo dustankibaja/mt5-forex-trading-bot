@@ -18,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from src.monitoring.status_snapshot import DEFAULT_STATUS_PATH, public_snapshot
+from src.monitoring.demo_account_snapshot import DEFAULT_DEMO_PATH, public_demo_snapshot
 
 
 def token_valid(header: str | None, token: str) -> bool:
@@ -30,7 +31,7 @@ def token_valid(header: str | None, token: str) -> bool:
     )
 
 
-def build_handler(token: str, status_path: Path):
+def build_handler(token: str, status_path: Path, demo_path: Path = DEFAULT_DEMO_PATH):
     class StatusHandler(BaseHTTPRequestHandler):
         def _reply(self, status: int, body: dict):
             data = json.dumps(body, separators=(",", ":")).encode("utf-8")
@@ -43,13 +44,24 @@ def build_handler(token: str, status_path: Path):
             self.wfile.write(data)
 
         def do_GET(self):
-            if self.path != "/v1/status":
+            if self.path not in ("/v1/status", "/v1/demo-account"):
                 self._reply(404, {"error": "not_found"})
                 return
             if not token_valid(self.headers.get("Authorization"), token):
                 self._reply(401, {"error": "unauthorized"})
                 return
-            self._reply(200, public_snapshot(status_path))
+            status = public_snapshot(status_path)
+            if self.path == "/v1/status":
+                self._reply(200, status)
+                return
+            # Never release balances when MT5 is disconnected, stale or
+            # configured for trading. Account endpoint requires healthy dry-run.
+            if (status["stale"] or status["state"] not in ("running", "paused")
+                    or status["mode"] != "dry_run"
+                    or status["trading_enabled"]):
+                self._reply(503, {"error": "demo_engine_unavailable"})
+                return
+            self._reply(200, public_demo_snapshot(demo_path))
 
         def do_POST(self):
             self._reply(405, {"error": "read_only"})
@@ -67,6 +79,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--status-path", type=Path, default=DEFAULT_STATUS_PATH)
+    parser.add_argument("--demo-path", type=Path,
+                        default=Path(os.environ.get("BOT_DEMO_ACCOUNT_PATH", str(DEFAULT_DEMO_PATH))))
     args = parser.parse_args()
     token = os.environ.get("BOT_STATUS_READ_TOKEN", "")
     if len(token) < 32:
@@ -75,7 +89,7 @@ def main():
         raise SystemExit("Port must be 1024..65535")
 
     server = ThreadingHTTPServer(
-        ("127.0.0.1", args.port), build_handler(token, args.status_path)
+        ("127.0.0.1", args.port), build_handler(token, args.status_path, args.demo_path)
     )
     print(f"Read-only status API: http://127.0.0.1:{args.port}/v1/status")
     try:
