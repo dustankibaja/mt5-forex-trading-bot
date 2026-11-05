@@ -1,0 +1,20 @@
+name: Research - verify independent bidask source
+on:
+  pull_request:
+    paths:
+      - "mt5-ai-bot/scripts/probe_independent_bidask_data.py"
+      - ".github/workflows/mt5-independent-source-probe.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  independent-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Find published provider endpoints (no broker data)
+        run: python mt5-ai-bot/scripts/probe_independent_bidask_data.py
