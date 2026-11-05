@@ -11,3 +11,6 @@ pyarrow==16.1.0; python_version < "3.13"
 
 
 pytest==8.2.2
+
+# On-screen private QR for one-scan phone pairing (Windows GUI).
+qrcode[pil]>=7.4.2,<9.0
