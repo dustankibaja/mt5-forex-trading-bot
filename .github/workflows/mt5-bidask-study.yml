@@ -17,7 +17,7 @@ permissions:
 jobs:
   bidask-study:
     runs-on: ubuntu-latest
-    timeout-minutes: 22
+    timeout-minutes: 35
     defaults:
       run:
         working-directory: mt5-ai-bot
@@ -32,8 +32,20 @@ jobs:
         run: python -m compileall -q src/research scripts/run_bidask_study.py
       - name: Unit tests with synthetic quotes (no network or broker)
         run: python -m pytest tests/test_bidask_research.py -q
+      - name: Restore cached validated Dukascopy source months
+        uses: actions/cache/restore@v4
+        with:
+          path: mt5-ai-bot/data/dukascopy_cache
+          key: duka-eurusd-bidask-h1-${{ github.run_id }}
+          restore-keys: duka-eurusd-bidask-h1-
       - name: Pre-registered Dukascopy data acquisition and experiment
         run: python scripts/run_bidask_study.py --out bidask_report
+      - name: Save source month progress even if provider returns 503
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: mt5-ai-bot/data/dukascopy_cache
+          key: duka-eurusd-bidask-h1-${{ github.run_id }}
       - name: Publish research summary
         if: always()
         run: |
