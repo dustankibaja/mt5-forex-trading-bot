@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT_DIR))
 
 
 import argparse
+import os
 import time
 from datetime import datetime, timezone
 
@@ -25,6 +26,9 @@ from src.execution.risk_manager import RiskLimits, RiskManager
 from src.execution.safeguards import kill_switch_active, is_symbol_tradable, spread_too_high, stops_level_ok
 from src.monitoring.alerts import load_telegram_alert
 from src.monitoring.journal import TradeJournal
+from src.monitoring.status_snapshot import DEFAULT_STATUS_PATH, publish_status
+from src.monitoring.demo_account_snapshot import DEFAULT_DEMO_PATH, capture_demo_snapshot, invalidate_demo_snapshot
+from src.monitoring.demo_controls import DEFAULT_PAUSE_PATH, demo_paused
 from src.strategy.atr_breakout import compute_signal
 from src.utils.logging import configure_logging, get_logger
 from src.utils.timeutils import is_in_session, parse_sessions
@@ -76,6 +80,18 @@ def refresh_account_risk(now: datetime, risk_manager: RiskManager) -> bool:
     return True
 
 
+def demo_account_connected() -> bool:
+    """Recheck identity: never run a demo-only worker against funded MT5."""
+    terminal = mt5.terminal_info()
+    account = mt5.account_info()
+    return bool(
+        terminal is not None
+        and getattr(terminal, "connected", False)
+        and account is not None
+        and getattr(account, "trade_mode", None) == mt5.ACCOUNT_TRADE_MODE_DEMO
+    )
+
+
 TIMEFRAME_MAP = {
     "M1": mt5.TIMEFRAME_M1,
     "M5": mt5.TIMEFRAME_M5,
@@ -103,19 +119,50 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--require-demo", action="store_true", help="Refuse non-demo MT5 accounts")
     args = parser.parse_args()
 
     configure_logging()
     load_dotenv()
     config = load_config(args.config)
+    # HARD RELEASE GATE: the legacy unattended worker may never place orders,
+    # even if someone changes config.yaml or omits --dry-run by mistake.
+    # A future profitable strategy needs a separately audited executable.
+    if not (args.dry_run and args.require_demo and config.execution.dry_run):
+        raise SystemExit(
+            "HARD_LOCK: unattended strategy worker is DEMO dry-run ONLY. "
+            "Use --dry-run --require-demo with execution.dry_run=true."
+        )
+    status_path = os.environ.get("BOT_STATUS_PATH", str(DEFAULT_STATUS_PATH))
+    demo_path = os.environ.get("BOT_DEMO_ACCOUNT_PATH", str(DEFAULT_DEMO_PATH))
+    remote_pause_path = os.environ.get("BOT_REMOTE_PAUSE_PATH", str(DEFAULT_PAUSE_PATH))
+    demo_only_readback = bool(args.require_demo and (args.dry_run or config.execution.dry_run))
+    # Never allow an old demo snapshot to remain visible after a restart.
+    invalidate_demo_snapshot(demo_path)
+
+    def heartbeat(state: str) -> None:
+        publish_status(
+            status_path, state=state,
+            dry_run=bool(args.dry_run or config.execution.dry_run),
+            symbols=config.symbols,
+            demo_guarded=demo_only_readback,
+        )
 
     adapter = MT5Adapter(
         retry_attempts=config.execution.retry_attempts,
         retry_backoff_seconds=config.execution.retry_backoff_seconds,
     )
     if not adapter.initialize():
+        heartbeat("offline")
         return
 
+    if args.require_demo and not demo_account_connected():
+        heartbeat("offline")
+        logger.error("DEMO account required; engine will not run")
+        adapter.shutdown()
+        return
+
+    heartbeat("running")
     alert = load_telegram_alert()
     journal = TradeJournal(path="trades/trade_journal.csv")
     risk_manager = RiskManager(
@@ -134,11 +181,22 @@ def main() -> None:
 
     try:
         while True:
+            if args.require_demo and not demo_account_connected():
+                invalidate_demo_snapshot(demo_path)
+                heartbeat("offline")
+                logger.error("DEMO account disconnected or changed; engine stopped")
+                break
+            manual_pause = kill_switch_active(config.execution.kill_switch_file)
+            remote_pause = demo_paused(remote_pause_path)
+            heartbeat("paused" if manual_pause or remote_pause else "running")
             now = datetime.now(timezone.utc)
+            if demo_only_readback:
+                if not capture_demo_snapshot(mt5, demo_path, now=now):
+                    logger.warning("DEMO account snapshot unavailable; app values hidden")
             risk_manager.reset_if_new_day(now)
 
-            if kill_switch_active(config.execution.kill_switch_file):
-                logger.warning("Kill switch active. No new trades.")
+            if manual_pause or remote_pause:
+                logger.info("Demo signals paused. No new trades or dry-run signals.")
                 time.sleep(5)
                 continue
 
@@ -278,7 +336,11 @@ def main() -> None:
 
             time.sleep(10)
     finally:
-        adapter.shutdown()
+        try:
+            invalidate_demo_snapshot(demo_path)
+            heartbeat("offline")
+        finally:
+            adapter.shutdown()
 
 
 if __name__ == "__main__":
