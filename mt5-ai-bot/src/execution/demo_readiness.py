@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from src.execution.demo_quote_time import quote_time_blocker
+
 
 @dataclass(frozen=True)
 class DemoReadiness:
@@ -119,7 +121,6 @@ def inspect_demo_execution_conditions(
             # EURUSD standard: 0.0001 is one pip; 5-digit quotes use fractional pip points.
             pip = 0.0001
             ask, bid = getattr(tick, "ask", None), getattr(tick, "bid", None)
-            when = getattr(tick, "time", None)
             if not (_finite_positive(ask) and _finite_positive(bid) and ask >= bid):
                 blockers.append("Invalid broker quote")
             else:
@@ -127,8 +128,11 @@ def inspect_demo_execution_conditions(
                 spread = round((ask - bid) / pip, 3)
                 if spread > max_spread_pips:
                     blockers.append("Broker spread exceeds demo trial limit")
-                if when is None or not -5 <= ((now_s or time.time()) - float(when)) <= 120:
-                    blockers.append("Broker tick is stale")
+                timestamp_blocker = quote_time_blocker(
+                    tick, time.time() if now_s is None else now_s
+                )
+                if timestamp_blocker:
+                    blockers.append(timestamp_blocker)
                 if float(getattr(info, "trade_stops_level", 0)) * float(point) > stop_pips * pip:
                     blockers.append("Minimum broker stop distance exceeds chosen test stop")
                 stop_buy = ask - stop_pips * pip

@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.execution.demo_quote_time import quote_time_blocker
+
 SYMBOL = "EURUSD"
 MAGIC = 830117
 PIP = 0.0001
@@ -36,7 +38,6 @@ DEFAULT_LEDGER = Path("runtime/demo_smoke_ledger.sqlite3")
 DEFAULT_PIN = Path("runtime/demo_broker_pin.json")
 MAX_RISK_PCT = 0.25
 MAX_SPREAD_PIPS = 2.0
-MAX_TICK_AGE_SECONDS = 60
 STOP_PIPS = 20
 TARGET_PIPS = 40
 ADVERSE_EXTRA_PIPS = 2
@@ -247,11 +248,14 @@ def execute_one_demo_smoke(
     tick = api.symbol_info_tick(SYMBOL)
     if tick is None:
         raise DemoSafetyError("Missing broker quote")
-    now_epoch = current.timestamp()
+    timestamp_blocker = quote_time_blocker(
+        tick, utcnow.timestamp() if utcnow else time.time()
+    )
+    if timestamp_blocker:
+        raise DemoSafetyError(timestamp_blocker)
     bid, ask = float(tick.bid), float(tick.ask)
-    if not (math.isfinite(bid) and math.isfinite(ask) and
-            0 < bid <= ask and 0 <= now_epoch - float(tick.time) <= MAX_TICK_AGE_SECONDS):
-        raise DemoSafetyError("Invalid or stale broker quote")
+    if not (math.isfinite(bid) and math.isfinite(ask) and 0 < bid <= ask):
+        raise DemoSafetyError("Invalid broker quote")
     if (ask - bid) / PIP > MAX_SPREAD_PIPS:
         raise DemoSafetyError("Spread exceeds DEMO smoke limit")
 
@@ -295,13 +299,32 @@ def execute_one_demo_smoke(
     if manual_kill_switch.exists() or remote_pause_path.exists():
         raise DemoSafetyError("Kill switch activated during order check")
     fresh_tick = api.symbol_info_tick(SYMBOL)
-    if (fresh_tick is None or not math.isfinite(float(fresh_tick.ask))
-            or abs(float(fresh_tick.ask) - ask) > 0.0001):
+    timestamp_blocker = quote_time_blocker(
+        fresh_tick, utcnow.timestamp() if utcnow else time.time()
+    )
+    if timestamp_blocker:
+        raise DemoSafetyError(timestamp_blocker)
+    if float(fresh_tick.ask) != ask or float(fresh_tick.bid) != bid:
         raise DemoSafetyError("Broker quote changed before DEMO send")
     _require_flat_account(api)
 
     day = current.strftime("%Y-%m-%d")
     _reserve_intent(ledger_path, digest, day, current.isoformat())
+    # SQLite may wait on another process. Revalidate the exact checked prices,
+    # exposure and account after that wait, before entering the broker send path.
+    _require_flat_account(api)
+    final_tick = api.symbol_info_tick(SYMBOL)
+    timestamp_blocker = quote_time_blocker(
+        final_tick, utcnow.timestamp() if utcnow else time.time()
+    )
+    if timestamp_blocker:
+        raise DemoSafetyError(timestamp_blocker)
+    if float(final_tick.ask) != ask or float(final_tick.bid) != bid:
+        raise DemoSafetyError("Broker quote changed during durable reservation")
+    if _require_pin(_account(api), pin_path) != digest:
+        raise DemoSafetyError("Account identity changed during durable reservation")
+    if manual_kill_switch.exists() or remote_pause_path.exists():
+        raise DemoSafetyError("Kill switch activated during durable reservation")
     try:
         result = api.order_send(request)   # Exactly ONE broker call.
     except Exception:

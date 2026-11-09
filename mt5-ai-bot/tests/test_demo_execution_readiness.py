@@ -39,7 +39,7 @@ class FakeMT5:
 
     def symbol_info_tick(self, symbol):
         return SimpleNamespace(ask=1.14000 + self.spread * 0.0001,
-                               bid=1.14000, time=1793875200)
+                               bid=1.14000, time=1793875200, time_msc=1793875200000)
 
     def order_calc_profit(self, side, symbol, volume, entry, exit):
         # Standard EURUSD 100,000 notional per full lot.
