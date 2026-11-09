@@ -37,6 +37,28 @@ def test_future_quote_after_durable_reservation_blocks_send(tmp_path, monkeypatc
         )
 
 
+def test_failed_sqlite_commit_cannot_send(tmp_path, monkeypatch):
+    api = FakeDemoMT5()
+    kwargs = _setup(tmp_path, api)
+    connect = sqlite3.connect
+
+    class FailingCommit(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if sql == "COMMIT":
+                raise sqlite3.OperationalError("simulated SQLite commit failure")
+            return super().execute(sql, parameters)
+
+    monkeypatch.setattr(
+        demo_order_firewall.sqlite3, "connect",
+        lambda *args, **opts: connect(*args, **opts, factory=FailingCommit),
+    )
+    with pytest.raises(sqlite3.OperationalError, match="simulated SQLite commit"):
+        execute_one_demo_smoke(api, execute=True, **kwargs)
+    assert api.sent == []
+    with connect(kwargs["ledger_path"]) as connection:
+        assert connection.execute("SELECT count(*) FROM smoke_intents").fetchone() == (0,)
+
+
 @pytest.mark.parametrize("scenario, expected", [
     ("closed", "CLOSURE_EVIDENCE"),
     ("open", "OPEN_EXPOSURE"),
