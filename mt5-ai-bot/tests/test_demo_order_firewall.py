@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -10,8 +12,75 @@ import pytest
 from src.execution.demo_order_firewall import (
     DemoSafetyError, execute_one_demo_smoke, initialize_broker_pin,
 )
+from src.execution.demo_reconciliation import audit_demo_smoke
 
 NOW = datetime(2026, 11, 5, 14, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("scenario, expected", [
+    ("closed", "CLOSURE_EVIDENCE"),
+    ("open", "OPEN_EXPOSURE"),
+    ("pending", "PENDING_EXPOSURE"),
+    ("missing_close", "UNVERIFIED"),
+    ("wrong_magic", "UNVERIFIED"),
+    ("working_order", "UNVERIFIED"),
+])
+def test_audit_matches_receipt_and_keeps_ledger_locked(tmp_path, scenario, expected):
+    api = FakeDemoMT5()
+    kwargs = _setup(tmp_path, api)
+    api.result = SimpleNamespace(retcode=api.TRADE_RETCODE_DONE, order=10, deal=11)
+    execute_one_demo_smoke(api, execute=True, **kwargs)
+    api.DEAL_ENTRY_IN, api.DEAL_ENTRY_OUT = 0, 1
+    api.DEAL_TYPE_BUY, api.DEAL_TYPE_SELL = 0, 1
+    api.ORDER_STATE_FILLED, api.ORDER_STATE_CANCELED, api.ORDER_STATE_EXPIRED = 4, 2, 6
+    order = SimpleNamespace(ticket=10, symbol="EURUSD", magic=830117, state=4)
+    fill = SimpleNamespace(ticket=11, order=10, position_id=12, symbol="EURUSD",
+                           magic=830117, entry=0, type=0, volume=0.01)
+    close = SimpleNamespace(ticket=13, position_id=12, symbol="EURUSD",
+                            entry=1, type=1, volume=0.01)
+    api.history_orders_get = lambda ticket: (order,) if ticket == 10 else ()
+    api.history_deals_get = lambda ticket=None, position=None: (
+        (fill,) if ticket == 10 or scenario == "missing_close"
+        else (fill, close) if position == 12 else ()
+    )
+    if scenario == "open":
+        api.exposures = (SimpleNamespace(identifier=12),)
+    if scenario == "pending":
+        api.pending = (SimpleNamespace(ticket=10, position_id=12),)
+    if scenario == "wrong_magic":
+        order.magic = 0
+    if scenario == "working_order":
+        order.state = 1
+    ledger = kwargs["ledger_path"]
+    before = ledger.read_bytes()
+    result = audit_demo_smoke(api, pin_path=kwargs["pin_path"], ledger_path=ledger)
+    assert result["status"] == expected
+    assert result["execution_locked"] is True
+    assert ledger.read_bytes() == before
+    assert len(api.sent) == 1
+
+
+def test_ledger_blocks_a_new_process_on_a_later_day(tmp_path):
+    api = FakeDemoMT5()
+    kwargs = _setup(tmp_path, api)
+    execute_one_demo_smoke(api, execute=True, **kwargs)
+    child = subprocess.run(
+        [sys.executable, "-c", """
+from pathlib import Path
+import sys
+from src.execution.demo_order_firewall import DemoSafetyError, _reserve_intent
+try:
+    _reserve_intent(Path(sys.argv[1]), "different-digest", "2026-11-06",
+                    "2026-11-06T14:00:00+00:00")
+except DemoSafetyError as exc:
+    if "requires verified broker reconciliation" not in str(exc):
+        raise
+else:
+    raise SystemExit("Durable guard allowed a second reservation")
+""", str(kwargs["ledger_path"])],
+        capture_output=True, text=True, timeout=20,
+    )
+    assert child.returncode == 0, child.stderr
 
 
 class FakeDemoMT5:

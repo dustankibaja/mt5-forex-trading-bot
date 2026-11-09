@@ -20,6 +20,7 @@ from src.execution.demo_order_firewall import (
     execute_one_demo_smoke,
     initialize_broker_pin,
 )
+from src.execution.demo_reconciliation import audit_demo_smoke
 
 
 def main() -> int:
@@ -27,6 +28,7 @@ def main() -> int:
     command = parser.add_mutually_exclusive_group(required=True)
     command.add_argument("--pin-demo-account", action="store_true")
     command.add_argument("--execute-one-demo-smoke", action="store_true")
+    command.add_argument("--audit-demo-smoke", action="store_true")
     parser.add_argument("--confirm", default="", help="Local operator consent")
     args = parser.parse_args()
     if args.execute_one_demo_smoke and args.confirm != "DEMO_ONLY_ONE_TINY_ORDER":
@@ -36,6 +38,9 @@ def main() -> int:
         print("MT5 desktop unavailable.")
         return 2
     try:
+        if args.audit_demo_smoke:
+            print(json.dumps(audit_demo_smoke(mt5), indent=2))
+            return 0
         if args.pin_demo_account:
             initialize_broker_pin(mt5)
             print("DEMO broker identity pinned locally. No order submitted.")

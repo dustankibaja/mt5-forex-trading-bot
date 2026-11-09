@@ -122,6 +122,11 @@ def _ledger_connect(path: Path) -> sqlite3.Connection:
       symbol TEXT NOT NULL, sent_at TEXT NOT NULL, status TEXT NOT NULL,
       retcode INTEGER, PRIMARY KEY (account_digest, day_utc, symbol)
     )""")
+    con.execute("""CREATE TABLE IF NOT EXISTS smoke_receipts (
+      account_digest TEXT NOT NULL, day_utc TEXT NOT NULL, symbol TEXT NOT NULL,
+      order_ticket INTEGER NOT NULL, deal_ticket INTEGER NOT NULL,
+      PRIMARY KEY (account_digest, day_utc, symbol)
+    )""")
     return con
 
 
@@ -158,14 +163,22 @@ def _reserve_intent(path: Path, digest: str, day: str, at: str) -> None:
 
 
 def _record_result(path: Path, digest: str, day: str, status: str,
-                   retcode: int | None) -> None:
+                   retcode: int | None, receipt=None) -> None:
     con = _ledger_connect(path)
     try:
+        con.execute("BEGIN IMMEDIATE")
         con.execute(
             "UPDATE smoke_intents SET status=?,retcode=?"
             " WHERE account_digest=? AND day_utc=? AND symbol=?",
             (status, retcode, digest, day, SYMBOL),
         )
+        if receipt is not None:
+            con.execute(
+                "INSERT INTO smoke_receipts VALUES (?,?,?,?,?)",
+                (digest, day, SYMBOL, getattr(receipt, "order", 0),
+                 getattr(receipt, "deal", 0)),
+            )
+        con.execute("COMMIT")
     finally:
         con.close()
 
@@ -305,5 +318,5 @@ def execute_one_demo_smoke(
         status = "DEMO_PARTIAL_FILL_RECONCILE"
     else:
         status = "DEMO_ORDER_OUTCOME_RECONCILE"
-    _record_result(ledger_path, digest, day, status, retcode)
+    _record_result(ledger_path, digest, day, status, retcode, receipt=result)
     return SmokeResult(status, retcode, True, "Broker record/reconciliation required")
