@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -32,8 +32,12 @@ class FakeDemoMT5:
         self.server = "FakeDemo"
         self.exposures = ()
         self.pending = ()
+        self.other_symbol_exposures = ()
+        self.other_symbol_pending = ()
+        self.exposure_appears_during_check = False
         self.trade_allowed = True
         self.quote_age = 0
+        self.tick_epoch = NOW.timestamp()
         self.spread = 1.0
         self.lot_min = .01
         self.equity = 10_000.0
@@ -63,13 +67,19 @@ class FakeDemoMT5:
     def symbol_info_tick(self, symbol):
         return SimpleNamespace(ask=1.14000 + self.spread * .0001,
                                bid=1.14000,
-                               time=NOW.timestamp()-self.quote_age)
+                               time=self.tick_epoch-self.quote_age)
 
-    def positions_get(self, symbol):
-        return self.exposures
+    def positions_get(self, symbol=None):
+        if symbol == "EURUSD":
+            return self.exposures
+        assert symbol is None, "Safety check must use account-wide MT5 read"
+        return self.exposures + self.other_symbol_exposures
 
-    def orders_get(self, symbol):
-        return self.pending
+    def orders_get(self, symbol=None):
+        if symbol == "EURUSD":
+            return self.pending
+        assert symbol is None, "Safety check must use account-wide MT5 read"
+        return self.pending + self.other_symbol_pending
 
     def order_calc_profit(self, side, symbol, volume, entry, stop):
         return (stop - entry) * 100000 * volume
@@ -78,6 +88,8 @@ class FakeDemoMT5:
         return volume * 1000
 
     def order_check(self, request):
+        if self.exposure_appears_during_check:
+            self.other_symbol_pending = (object(),)
         if self.switch_to_live_during_check:
             self.mode = self.ACCOUNT_TRADE_MODE_REAL
         if self.fail_check:
@@ -123,7 +135,7 @@ def test_demo_smoke_sends_exactly_once_with_protective_orders(tmp_path):
     assert request["sl"] < request["price"] < request["tp"]
     assert request["volume"] == .01
     assert result.public_report()["live_trading_enabled"] is False
-    with pytest.raises(DemoSafetyError, match="quota"):
+    with pytest.raises(DemoSafetyError, match="reconciliation"):
         execute_one_demo_smoke(api, execute=True, **kw)
     assert len(api.sent) == 1
     con = sqlite3.connect(kw["ledger_path"])
@@ -186,7 +198,7 @@ def test_unknown_broker_outcome_never_retries(tmp_path):
         execute_one_demo_smoke(api, execute=True, **kw)
     assert len(api.sent) == 1
     api.exception_on_send = False
-    with pytest.raises(DemoSafetyError, match="quota"):
+    with pytest.raises(DemoSafetyError, match="reconciliation"):
         execute_one_demo_smoke(api, execute=True, **kw)
     assert len(api.sent) == 1
     con = sqlite3.connect(kw["ledger_path"])
@@ -201,7 +213,7 @@ def test_unknown_result_never_retries_after_restart(tmp_path):
     with pytest.raises(DemoSafetyError, match="No broker result"):
         execute_one_demo_smoke(api, execute=True, **kw)
     assert len(api.sent) == 1
-    with pytest.raises(DemoSafetyError, match="quota"):
+    with pytest.raises(DemoSafetyError, match="reconciliation"):
         execute_one_demo_smoke(api, execute=True, **kw)
 
 
@@ -210,3 +222,69 @@ def test_refuses_silent_repin_even_same_account(tmp_path):
     kw = _setup(tmp_path, api)
     with pytest.raises(DemoSafetyError, match="already pinned"):
         initialize_broker_pin(api, kw["pin_path"])
+
+
+@pytest.mark.parametrize("status", [
+    "ATTEMPT_RESERVED",
+    "UNKNOWN_BROKER_OUTCOME",
+    "DEMO_PARTIAL_FILL_RECONCILE",
+    "DEMO_ORDER_OUTCOME_RECONCILE",
+    "DEMO_ORDER_FILLED",
+])
+def test_previous_unreconciled_attempt_stops_next_day(tmp_path, status):
+    api = FakeDemoMT5()
+    kw = _setup(tmp_path, api)
+    con = sqlite3.connect(kw["ledger_path"])
+    con.execute(
+        "CREATE TABLE smoke_intents ("
+        "account_digest TEXT NOT NULL, day_utc TEXT NOT NULL,"
+        "symbol TEXT NOT NULL, sent_at TEXT NOT NULL, status TEXT NOT NULL,"
+        "retcode INTEGER, PRIMARY KEY(account_digest,day_utc,symbol))"
+    )
+    con.execute(
+        "INSERT INTO smoke_intents VALUES (?, ?, ?, ?, ?, ?)",
+        ("old-digest", "2026-11-04", "EURUSD",
+         "2026-11-04T15:00:00+00:00", status, None)
+    )
+    con.commit()
+    con.close()
+    with pytest.raises(DemoSafetyError, match="reconciliation"):
+        execute_one_demo_smoke(api, execute=True, **kw)
+    assert api.sent == []
+
+
+@pytest.mark.parametrize("kind", ["other_position", "other_order"])
+def test_other_market_exposure_blocks_demo_smoke(tmp_path, kind):
+    api = FakeDemoMT5()
+    kw = _setup(tmp_path, api)
+    if kind == "other_position":
+        api.other_symbol_exposures = (object(),)
+    else:
+        api.other_symbol_pending = (object(),)
+    with pytest.raises(DemoSafetyError, match="DEMO account has positions"):
+        execute_one_demo_smoke(api, execute=True, **kw)
+    assert api.sent == []
+
+
+def test_other_symbol_order_appearing_after_preflight_blocks_send(tmp_path):
+    api = FakeDemoMT5()
+    kw = _setup(tmp_path, api)
+    api.exposure_appears_during_check = True
+    with pytest.raises(DemoSafetyError, match="DEMO account has positions"):
+        execute_one_demo_smoke(api, execute=True, **kw)
+    assert api.sent == []
+
+
+def test_previous_order_ledger_survives_restart_on_next_utc_day(tmp_path):
+    api = FakeDemoMT5()
+    kw = _setup(tmp_path, api)
+    first = execute_one_demo_smoke(api, execute=True, **kw)
+    assert first.status == "DEMO_ORDER_FILLED"
+    # Treat a broker-reported DONE as an OPEN position until independently
+    # reconciled; a calendar boundary cannot authorize another attempt.
+    kw["utcnow"] = NOW + timedelta(days=1)
+    api.tick_epoch = kw["utcnow"].timestamp()
+    assert kw["utcnow"].weekday() <= 4
+    with pytest.raises(DemoSafetyError, match="reconciliation"):
+        execute_one_demo_smoke(api, execute=True, **kw)
+    assert len(api.sent) == 1
