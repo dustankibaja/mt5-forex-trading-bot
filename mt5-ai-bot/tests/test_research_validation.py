@@ -59,3 +59,14 @@ def test_simulation_is_deterministic():
     a = simulate(bars, "ema_cross", "2020-01-01", "2020-01-10")
     b = simulate(bars, "ema_cross", "2020-01-01", "2020-01-10")
     assert a == b
+
+
+def test_intrabar_exit_cannot_reopen_at_the_same_bar_open(monkeypatch):
+    bars = prices()
+    bars["atr14"] = 0.001
+    bars.iloc[202, bars.columns.get_loc("low")] = 1.097
+    monkeypatch.setattr(
+        "src.research.backtest.signal", lambda frame, i, name: int(i in (200, 201))
+    )
+    result = simulate(bars, "donchian", "2020-01-01", "2020-01-20")
+    assert result["trades"] == 1

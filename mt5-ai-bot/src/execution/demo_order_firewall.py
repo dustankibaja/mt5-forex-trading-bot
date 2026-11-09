@@ -6,7 +6,8 @@ Uses a dedicated local opt-in; no phone/browser command path.
 Security properties:
 - Broker must be connected AND trade_mode == DEMO immediately before send.
 - Locally pinned account fingerprint (never exposed through API) must match.
-- Static EURUSD-only, maximum one attempt per UTC day and unique intent.
+- Static EURUSD-only order, at most ONE lifetime smoke attempt until audited
+  broker reconciliation is implemented; no auto-unlocking across UTC days.
 - Broker-side SL and TP required, risk capped at 0.25% with slip/fees buffer,
   max 25% margin/free margin, fresh quote/spread, no any-symbol positions/orders.
 - Durable SQLite intent COMMITTED *before* exactly one order_send. Unknown
@@ -34,7 +35,6 @@ PIP = 0.0001
 DEFAULT_LEDGER = Path("runtime/demo_smoke_ledger.sqlite3")
 DEFAULT_PIN = Path("runtime/demo_broker_pin.json")
 MAX_RISK_PCT = 0.25
-MAX_DAILY_ATTEMPTS = 1
 MAX_SPREAD_PIPS = 2.0
 MAX_TICK_AGE_SECONDS = 60
 STOP_PIPS = 20
@@ -122,6 +122,11 @@ def _ledger_connect(path: Path) -> sqlite3.Connection:
       symbol TEXT NOT NULL, sent_at TEXT NOT NULL, status TEXT NOT NULL,
       retcode INTEGER, PRIMARY KEY (account_digest, day_utc, symbol)
     )""")
+    con.execute("""CREATE TABLE IF NOT EXISTS smoke_receipts (
+      account_digest TEXT NOT NULL, day_utc TEXT NOT NULL, symbol TEXT NOT NULL,
+      order_ticket INTEGER NOT NULL, deal_ticket INTEGER NOT NULL,
+      PRIMARY KEY (account_digest, day_utc, symbol)
+    )""")
     return con
 
 
@@ -129,13 +134,20 @@ def _reserve_intent(path: Path, digest: str, day: str, at: str) -> None:
     con = _ledger_connect(path)
     try:
         con.execute("BEGIN IMMEDIATE")
-        rows = con.execute(
-            "SELECT COUNT(*) FROM smoke_intents WHERE day_utc=?",
-            (day,),
-        ).fetchone()[0]
-        if rows >= MAX_DAILY_ATTEMPTS:
+        # Any historical attempt may still be open or awaiting broker history.
+        # Even a known DONE result is NOT evidence that the resulting position
+        # has closed, and the current system has no audited reconciliation
+        # workflow. Fail closed across ALL UTC dates and all account digests.
+        # Do not whitelist statuses here until durable reconciliation exists.
+        previous = con.execute(
+            "SELECT day_utc,status FROM smoke_intents LIMIT 1"
+        ).fetchone()
+        if previous is not None:
             con.execute("ROLLBACK")
-            raise DemoSafetyError("Daily one-shot DEMO smoke quota exhausted")
+            raise DemoSafetyError(
+                "Prior DEMO smoke intent requires verified broker reconciliation;"
+                " further orders locked across dates"
+            )
         try:
             con.execute(
                 "INSERT INTO smoke_intents(account_digest,day_utc,symbol,sent_at,status)"
@@ -151,16 +163,39 @@ def _reserve_intent(path: Path, digest: str, day: str, at: str) -> None:
 
 
 def _record_result(path: Path, digest: str, day: str, status: str,
-                   retcode: int | None) -> None:
+                   retcode: int | None, receipt=None) -> None:
     con = _ledger_connect(path)
     try:
+        con.execute("BEGIN IMMEDIATE")
         con.execute(
             "UPDATE smoke_intents SET status=?,retcode=?"
             " WHERE account_digest=? AND day_utc=? AND symbol=?",
             (status, retcode, digest, day, SYMBOL),
         )
+        if receipt is not None:
+            con.execute(
+                "INSERT INTO smoke_receipts VALUES (?,?,?,?,?)",
+                (digest, day, SYMBOL, getattr(receipt, "order", 0),
+                 getattr(receipt, "deal", 0)),
+            )
+        con.execute("COMMIT")
     finally:
         con.close()
+
+
+def _require_flat_account(api) -> None:
+    """Block when the DEMO account has ANY position or pending order.
+
+    MT5 positions_get()/orders_get() with NO symbol argument returns the
+    complete account's positions/orders. Filtering only EURUSD is unsafe:
+    unrelated manual exposure would otherwise be overlooked.
+    """
+    positions = api.positions_get()
+    orders = api.orders_get()
+    if positions is None or orders is None:
+        raise DemoSafetyError("Cannot reconcile account-wide positions and orders")
+    if len(positions) or len(orders):
+        raise DemoSafetyError("DEMO account has positions or pending orders")
 
 
 def execute_one_demo_smoke(
@@ -220,12 +255,7 @@ def execute_one_demo_smoke(
     if (ask - bid) / PIP > MAX_SPREAD_PIPS:
         raise DemoSafetyError("Spread exceeds DEMO smoke limit")
 
-    positions = api.positions_get(symbol=SYMBOL)
-    orders = api.orders_get(symbol=SYMBOL)
-    if positions is None or orders is None:
-        raise DemoSafetyError("Cannot reconcile broker positions and orders")
-    if len(positions) or len(orders):
-        raise DemoSafetyError("EURUSD already has broker exposure/pending orders")
+    _require_flat_account(api)
 
     # DEMO smoke direction fixed BUY; this has NO claim to profit potential.
     direction = api.ORDER_TYPE_BUY
@@ -268,10 +298,7 @@ def execute_one_demo_smoke(
     if (fresh_tick is None or not math.isfinite(float(fresh_tick.ask))
             or abs(float(fresh_tick.ask) - ask) > 0.0001):
         raise DemoSafetyError("Broker quote changed before DEMO send")
-    if api.positions_get(symbol=SYMBOL) is None or api.orders_get(symbol=SYMBOL) is None:
-        raise DemoSafetyError("Broker reconciliation failed before DEMO send")
-    if len(api.positions_get(symbol=SYMBOL)) or len(api.orders_get(symbol=SYMBOL)):
-        raise DemoSafetyError("Other EURUSD broker exposure appeared before send")
+    _require_flat_account(api)
 
     day = current.strftime("%Y-%m-%d")
     _reserve_intent(ledger_path, digest, day, current.isoformat())
@@ -291,5 +318,5 @@ def execute_one_demo_smoke(
         status = "DEMO_PARTIAL_FILL_RECONCILE"
     else:
         status = "DEMO_ORDER_OUTCOME_RECONCILE"
-    _record_result(ledger_path, digest, day, status, retcode)
+    _record_result(ledger_path, digest, day, status, retcode, receipt=result)
     return SmokeResult(status, retcode, True, "Broker record/reconciliation required")
