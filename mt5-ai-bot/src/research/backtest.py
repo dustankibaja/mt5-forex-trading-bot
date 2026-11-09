@@ -47,6 +47,7 @@ def simulate(
         current_day = df.index[i].strftime("%Y-%m-%d")
         if current_day != day:
             day, day_pnl, day_count = current_day, 0.0, 0
+        flat_at_open = position is None
 
         if position is not None:
             p = position
@@ -81,7 +82,7 @@ def simulate(
 
         # Never open on the last bar of a partition, and never use current
         # bar's close, high or low for an order at the same bar's open.
-        if (position is None and i < finish - 1 and i > begin and i > 200
+        if (flat_at_open and i < finish - 1 and i > begin and i > 200
                 and day_count < 3 and day_pnl > -0.02 * bal):
             direction = signal(df, i - 1, strategy)
             distance = atr[i - 1] * 1.5
