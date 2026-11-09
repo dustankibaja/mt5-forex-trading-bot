@@ -37,6 +37,7 @@ class FakeDemoMT5:
         self.exposure_appears_during_check = False
         self.trade_allowed = True
         self.quote_age = 0
+        self.tick_epoch = NOW.timestamp()
         self.spread = 1.0
         self.lot_min = .01
         self.equity = 10_000.0
@@ -66,7 +67,7 @@ class FakeDemoMT5:
     def symbol_info_tick(self, symbol):
         return SimpleNamespace(ask=1.14000 + self.spread * .0001,
                                bid=1.14000,
-                               time=NOW.timestamp()-self.quote_age)
+                               time=self.tick_epoch-self.quote_age)
 
     def positions_get(self, symbol=None):
         if symbol == "EURUSD":
@@ -282,6 +283,7 @@ def test_previous_order_ledger_survives_restart_on_next_utc_day(tmp_path):
     # Treat a broker-reported DONE as an OPEN position until independently
     # reconciled; a calendar boundary cannot authorize another attempt.
     kw["utcnow"] = NOW + timedelta(days=1)
+    api.tick_epoch = kw["utcnow"].timestamp()
     assert kw["utcnow"].weekday() <= 4
     with pytest.raises(DemoSafetyError, match="reconciliation"):
         execute_one_demo_smoke(api, execute=True, **kw)
