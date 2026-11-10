@@ -148,6 +148,12 @@ def test_audit_counts_zero_once_after_restart_and_long_gap(tmp_path, monkeypatch
     assert result["polls"] == 5
     assert result["rollovers"] == 1
     assert result["decisions"] == {"0": 1}
+    evidence = result["first_observed_decision"]
+    assert evidence["journal_poll_id"] == 2
+    assert evidence["previous_poll_id"] == 1
+    assert evidence["previous_active_raw_time"] == evidence["latest_completed_raw_time"]
+    assert evidence["raw_broker_hour_signal"] == 0
+    assert evidence["clock_certified"] is False
     assert result["restart_transitions"] == 1
     assert result["gaps"] == {"restart_or_poll_gap": 2}
     assert result["issues"] == {}
@@ -172,3 +178,18 @@ def test_audit_flags_missing_bar_index_even_when_sqlite_is_healthy(tmp_path, mon
     result = audit_forward(path)
     assert result["integrity_ok"]
     assert result["issues"] == {"bar_index_mismatch": 1}
+
+
+def test_audit_flags_malformed_poll_without_inventing_a_heartbeat(tmp_path):
+    import sqlite3
+    from contextlib import closing
+
+    path = tmp_path / "forward.sqlite3"
+    ProspectiveJournal(path).poll(ForwardFeed())
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("UPDATE forward_polls SET payload = 'invalid JSON'")
+    result = audit_forward(path)
+    assert result["integrity_ok"]
+    assert result["issues"] == {"malformed_poll": 1}
+    assert result["first_observed_decision"] is None
+    assert result["poll_heartbeat_fresh"] is False
