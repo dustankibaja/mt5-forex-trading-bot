@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from src.monitoring.shadow_diagnostics import export, observe
+from src.monitoring.shadow_diagnostics import ProspectiveJournal, export, export_forward, observe
 
 
 class DemoFeed:
@@ -48,3 +48,73 @@ def test_funded_session_creates_no_journal(tmp_path):
     with pytest.raises(RuntimeError, match="Connected DEMO"):
         observe(api, journal)
     assert not journal.exists()
+
+
+class ForwardFeed(DemoFeed):
+    offset = 0
+    connected = True
+    login = 1
+
+    def account_info(self):
+        return SimpleNamespace(trade_mode=self.mode, login=self.login, server="demo")
+
+    def terminal_info(self):
+        return SimpleNamespace(connected=self.connected)
+
+    def copy_rates_from_pos(self, symbol, timeframe, start, count):
+        assert (symbol, timeframe, start, count) == ("EURUSD", self.TIMEFRAME_H1, 0, 513)
+        rates = super().copy_rates_from_pos(symbol, timeframe, 1, 512)
+        rates["time"] += self.offset * 3600
+        return rates
+
+    def symbol_info_tick(self, symbol):
+        return SimpleNamespace(time=1_800_007_200, time_msc=1_800_007_200_000,
+                               bid=1.10001, ask=1.10003)
+
+
+def test_observed_rollover_and_restart_gap(tmp_path, monkeypatch):
+    now = [100]
+    monkeypatch.setattr("src.monitoring.shadow_diagnostics.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("src.monitoring.shadow_diagnostics.time.time", lambda: 1_800_000_000 + now[0])
+    path = tmp_path / "forward.sqlite3"
+    feed = ForwardFeed()
+    journal = ProspectiveJournal(path)
+    assert journal.poll(feed)["raw_broker_hour_signal"] is None
+    feed.offset = 1
+    now[0] += 15
+    assert journal.poll(feed)["raw_broker_hour_signal"] == 0
+    feed.offset = 4
+    now[0] += 15
+    missed = ProspectiveJournal(path).poll(feed)
+    assert missed["gap_reason"] == "restart_or_poll_gap"
+    assert missed["unobserved_raw_hours"] == 3
+    assert missed["raw_broker_hour_signal"] is None
+    assert missed["bid"] == 1.10001
+    assert missed["clock_certified"] is False
+    assert len(export_forward(path)["forward"]) == 3
+
+
+def test_disconnected_poll_and_corrupt_file_fail_closed(tmp_path):
+    path = tmp_path / "forward.sqlite3"
+    feed = ForwardFeed()
+    feed.connected = False
+    with pytest.raises(RuntimeError, match="Connected DEMO"):
+        ProspectiveJournal(path).poll(feed)
+    assert not path.exists()
+    original = b"invalid sqlite"
+    path.write_bytes(original)
+    feed.connected = True
+    import sqlite3
+    with pytest.raises(sqlite3.DatabaseError):
+        ProspectiveJournal(path).poll(feed)
+    assert path.read_bytes() == original
+
+
+def test_restarted_journal_rejects_different_demo_identity(tmp_path):
+    path = tmp_path / "forward.sqlite3"
+    feed = ForwardFeed()
+    ProspectiveJournal(path).poll(feed)
+    feed.login = 2
+    with pytest.raises(RuntimeError, match="different DEMO source"):
+        ProspectiveJournal(path).poll(feed)
+    assert len(export_forward(path)["forward"]) == 1

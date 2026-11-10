@@ -128,7 +128,19 @@ def _require_pin(account, path: Path) -> str:
         raise DemoSafetyError("Valid pinned DEMO identity required") from exc
 
 
-def _ledger_connect(path: Path) -> sqlite3.Connection:
+def _ledger_connect(path: Path, existing_only: bool = False) -> sqlite3.Connection:
+    if existing_only:
+        try:
+            con = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True,
+                                  timeout=20, isolation_level=None)
+        except sqlite3.Error as exc:
+            raise DemoSafetyError("Canonical DEMO ledger cannot be opened") from exc
+        try:
+            con.execute("PRAGMA synchronous=FULL")
+        except sqlite3.Error:
+            con.close()
+            raise
+        return con
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(path, timeout=20, isolation_level=None)
     con.execute("PRAGMA synchronous=FULL")
@@ -145,8 +157,8 @@ def _ledger_connect(path: Path) -> sqlite3.Connection:
     return con
 
 
-def _reserve_intent(path: Path, digest: str, day: str, at: str) -> None:
-    con = _ledger_connect(path)
+def _reserve_intent(path: Path, digest: str, day: str, at: str, existing_only: bool = False) -> None:
+    con = _ledger_connect(path, existing_only)
     try:
         con.execute("BEGIN IMMEDIATE")
         # Any historical attempt may still be open or awaiting broker history.
@@ -178,8 +190,8 @@ def _reserve_intent(path: Path, digest: str, day: str, at: str) -> None:
 
 
 def _record_result(path: Path, digest: str, day: str, status: str,
-                   retcode: int | None, receipt=None) -> None:
-    con = _ledger_connect(path)
+                   retcode: int | None, receipt=None, *, existing_only: bool = False) -> None:
+    con = _ledger_connect(path, existing_only)
     try:
         con.execute("BEGIN IMMEDIATE")
         con.execute(
@@ -222,6 +234,7 @@ def execute_one_demo_smoke(
     remote_pause_path: Path = Path("runtime/remote_pause.flag"),
     execute: bool = False,
     utcnow: datetime | None = None,
+    existing_ledger_only: bool = False,
 ) -> SmokeResult:
     """Broker-side DEMO test order. Default is READ-ONLY. No blind retries."""
     if not execute:
@@ -320,7 +333,7 @@ def execute_one_demo_smoke(
     _require_flat_account(api)
 
     day = current.strftime("%Y-%m-%d")
-    _reserve_intent(ledger_path, digest, day, current.isoformat())
+    _reserve_intent(ledger_path, digest, day, current.isoformat(), existing_ledger_only)
     # SQLite may wait on another process. Revalidate the exact checked prices,
     # exposure and account after that wait, before entering the broker send path.
     _require_flat_account(api)
@@ -332,6 +345,15 @@ def execute_one_demo_smoke(
         raise DemoSafetyError(timestamp_blocker)
     if float(final_tick.ask) != ask or float(final_tick.bid) != bid:
         raise DemoSafetyError("Broker quote changed during durable reservation")
+    final_info = api.symbol_info(SYMBOL)
+    contract_fields = ("trade_mode", "visible", "digits", "point", "volume_min",
+                       "volume_max", "volume_step", "trade_stops_level",
+                       "trade_freeze_level", "filling_mode", "trade_exemode")
+    if final_info is None or any(
+        getattr(final_info, field, None) != getattr(info, field, None)
+        for field in contract_fields
+    ):
+        raise DemoSafetyError("Broker contract changed during durable reservation")
     final_account = _account(api)
     if _require_pin(final_account, pin_path) != digest:
         raise DemoSafetyError("Account identity changed during durable reservation")
@@ -341,10 +363,12 @@ def execute_one_demo_smoke(
     try:
         result = api.order_send(request)   # Exactly ONE broker call.
     except Exception:
-        _record_result(ledger_path, digest, day, "UNKNOWN_BROKER_OUTCOME", None)
+        _record_result(ledger_path, digest, day, "UNKNOWN_BROKER_OUTCOME", None,
+                       existing_only=existing_ledger_only)
         raise DemoSafetyError("Unknown broker outcome; never retry without reconciliation")
     if result is None:
-        _record_result(ledger_path, digest, day, "UNKNOWN_BROKER_OUTCOME", None)
+        _record_result(ledger_path, digest, day, "UNKNOWN_BROKER_OUTCOME", None,
+                       existing_only=existing_ledger_only)
         raise DemoSafetyError("No broker result; never retry automatically")
 
     retcode = int(result.retcode)
@@ -354,5 +378,6 @@ def execute_one_demo_smoke(
         status = "DEMO_PARTIAL_FILL_RECONCILE"
     else:
         status = "DEMO_ORDER_OUTCOME_RECONCILE"
-    _record_result(ledger_path, digest, day, status, retcode, receipt=result)
+    _record_result(ledger_path, digest, day, status, retcode, receipt=result,
+                   existing_only=existing_ledger_only)
     return SmokeResult(status, retcode, True, "Broker record/reconciliation required")

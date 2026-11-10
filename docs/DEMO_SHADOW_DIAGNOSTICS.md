@@ -12,6 +12,10 @@ Add `--watch` to poll every 15 seconds. Ctrl+C detaches the Python process from 
 python scripts/run_shadow_diagnostics.py --journal runtime/shadow.sqlite3 --export
 ```
 
-The observer requests completed H1 EURUSD bars starting at position 1. It evaluates the frozen Compression Release rules on chart OHLC as a bid-price proxy and uses raw broker-hour labels for the session filter. Both differ from the certified inputs a future forward simulator would need. SQLite stores the first observation per raw bar, including zero-direction decisions. The journal covers sampled bars. It does not reconstruct missed opportunities during downtime.
+The observer requests H1 EURUSD bars including the active bar as a rollover marker. It evaluates only the completed bar when consecutive polls in the same process observe an adjacent rollover. The frozen Compression Release rules use chart OHLC as a bid-price proxy and raw broker-hour labels for the session filter. Both differ from the certified inputs a future forward simulator would need.
 
-The mode is diagnostics only even if a raw timestamp passes the existing UTC checks. No simulated entries, exits, cost estimates, P&L or broker order routes exist in this command. The exported observations are not an evaluation of the sealed historical holdout.
+SQLite stores each poll with host UTC bounds, monotonic time, raw broker timestamps, bid and ask. A separate unique bar key prevents duplicate rollover signals, including zero-direction decisions. Restarts, gaps in polling, and non-adjacent raw bar times are marked. Retrieved candles are indicator warm-up context. The journal preserves prior Sprint 5 rows in the JSON export's `legacy` array. New rows appear in `forward`. Add `--format csv` to export the new poll records as CSV.
+
+The mode is diagnostics only even if a raw timestamp passes the existing UTC checks. Clock trust remains uncertified. The export contains observations and signals without fills or P&L.
+
+The Windows deployment keeps its original DPAPI pairing files and pause flag under the original checkout's `mt5-ai-bot/runtime`. The smoke CLI resolves that same runtime under the current Windows profile independently of the working directory. Execution requires a pre-existing valid ledger, a reviewed pin, and all other order gates. The CLI refuses to provision an account pin pending canonical runtime and broker history review.
