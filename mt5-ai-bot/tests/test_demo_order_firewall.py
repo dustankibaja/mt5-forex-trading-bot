@@ -18,6 +18,39 @@ from src.execution import demo_order_firewall
 NOW = datetime(2026, 11, 5, 14, 0, tzinfo=timezone.utc)
 
 
+def test_disabled_python_trading_blocks_send(tmp_path):
+    api = FakeDemoMT5()
+    kwargs = _setup(tmp_path, api)
+    api.tradeapi_disabled = True
+    with pytest.raises(DemoSafetyError, match="unauthorized"):
+        execute_one_demo_smoke(api, execute=True, **kwargs)
+    assert api.sent == []
+
+
+def test_non_usd_fee_budget_blocks_send(tmp_path):
+    api = FakeDemoMT5()
+    kwargs = _setup(tmp_path, api)
+    api.currency = "JPY"
+    with pytest.raises(DemoSafetyError, match="USD account currency"):
+        execute_one_demo_smoke(api, execute=True, **kwargs)
+    assert api.sent == []
+
+
+def test_equity_drop_after_durable_reservation_blocks_send(tmp_path, monkeypatch):
+    api = FakeDemoMT5()
+    kwargs = _setup(tmp_path, api)
+    reserve = demo_order_firewall._reserve_intent
+
+    def reserve_then_drop_equity(*args):
+        reserve(*args)
+        api.equity = 1_000.0
+
+    monkeypatch.setattr(demo_order_firewall, "_reserve_intent", reserve_then_drop_equity)
+    with pytest.raises(DemoSafetyError, match="0.25% equity"):
+        execute_one_demo_smoke(api, execute=True, **kwargs)
+    assert api.sent == []
+
+
 def test_future_quote_after_durable_reservation_blocks_send(tmp_path, monkeypatch):
     api = FakeDemoMT5()
     kwargs = _setup(tmp_path, api)
@@ -147,6 +180,8 @@ class FakeDemoMT5:
         self.other_symbol_pending = ()
         self.exposure_appears_during_check = False
         self.trade_allowed = True
+        self.tradeapi_disabled = False
+        self.currency = "USD"
         self.quote_age = 0
         self.tick_epoch = NOW.timestamp()
         self.spread = 1.0
@@ -160,13 +195,15 @@ class FakeDemoMT5:
 
     def terminal_info(self):
         return SimpleNamespace(connected=self.connected,
-                               trade_allowed=self.trade_allowed)
+                               trade_allowed=self.trade_allowed,
+                               tradeapi_disabled=self.tradeapi_disabled)
 
     def account_info(self):
         return SimpleNamespace(trade_mode=self.mode,
                                trade_allowed=self.trade_allowed, trade_expert=True,
                                login=self.login, server=self.server,
-                               equity=self.equity, margin_free=self.equity * .9)
+                               equity=self.equity, margin_free=self.equity * .9,
+                               currency=self.currency)
 
     def symbol_info(self, symbol):
         return SimpleNamespace(

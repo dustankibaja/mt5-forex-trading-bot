@@ -66,12 +66,26 @@ def _account(api):
     account = api.account_info()
     if (terminal is None or not getattr(terminal, "connected", False)
             or not getattr(terminal, "trade_allowed", False)
+            or getattr(terminal, "tradeapi_disabled", True)
             or account is None
             or getattr(account, "trade_mode", None) != api.ACCOUNT_TRADE_MODE_DEMO
             or not getattr(account, "trade_allowed", False)
             or not getattr(account, "trade_expert", False)):
         raise DemoSafetyError("Terminal disconnected, unauthorized, or NOT a trading-enabled DEMO")
     return account
+
+
+def _check_order_budget(account, potential_loss: float, margin: float) -> None:
+    # MT5 returns stop loss and margin in account currency. The fee reserve
+    # is in USD, so this fixed smoke order only supports USD accounts.
+    if getattr(account, "currency", None) != "USD":
+        raise DemoSafetyError("USD account currency required for DEMO smoke risk")
+    equity = float(getattr(account, "equity", float("nan")))
+    free_margin = float(getattr(account, "margin_free", float("nan")))
+    if not math.isfinite(equity) or potential_loss > equity * MAX_RISK_PCT / 100:
+        raise DemoSafetyError("Broker minimum-lot stop risk exceeds 0.25% equity")
+    if not math.isfinite(free_margin) or not 0 < margin <= free_margin * 0.25:
+        raise DemoSafetyError("Broker min lot consumes too much free margin")
 
 
 def _identity(account) -> bytes:
@@ -273,12 +287,9 @@ def execute_one_demo_smoke(
     if stop_loss is None or margin is None:
         raise DemoSafetyError("Missing broker stop loss/margin calculations")
     potential_loss = abs(float(stop_loss)) + FEE_RESERVE_USD
-    if (not math.isfinite(potential_loss) or float(stop_loss) >= 0 or
-            potential_loss > float(account.equity) * MAX_RISK_PCT / 100):
+    if not math.isfinite(potential_loss) or float(stop_loss) >= 0:
         raise DemoSafetyError("Broker minimum-lot stop risk exceeds 0.25% equity")
-    if not math.isfinite(float(margin)) or not (
-            0 < float(margin) <= float(account.margin_free) * 0.25):
-        raise DemoSafetyError("Broker min lot consumes too much free margin")
+    _check_order_budget(account, potential_loss, float(margin))
 
     request = {
         "action": api.TRADE_ACTION_DEAL, "symbol": SYMBOL,
@@ -321,8 +332,10 @@ def execute_one_demo_smoke(
         raise DemoSafetyError(timestamp_blocker)
     if float(final_tick.ask) != ask or float(final_tick.bid) != bid:
         raise DemoSafetyError("Broker quote changed during durable reservation")
-    if _require_pin(_account(api), pin_path) != digest:
+    final_account = _account(api)
+    if _require_pin(final_account, pin_path) != digest:
         raise DemoSafetyError("Account identity changed during durable reservation")
+    _check_order_budget(final_account, potential_loss, float(margin))
     if manual_kill_switch.exists() or remote_pause_path.exists():
         raise DemoSafetyError("Kill switch activated during durable reservation")
     try:
