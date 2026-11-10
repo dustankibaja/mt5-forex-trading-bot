@@ -32,4 +32,18 @@ The mode is diagnostics only even if a raw timestamp passes the existing UTC che
 
 Replaying the same ordered inputs reconstructs the lifecycle without persistent simulated orders. Hourly OHLC is insufficient for the replay. A future prospective runner would need certified quote provenance, a journal of immutable input references and versioned execution assumptions, a persistent trade key, and a portfolio reconciliation layer before aggregating net expectancy or account drawdown. Actual broker fills belong in a separate reconciliation path.
 
+## Synthetic portfolio journal and classified forward events
+
+`src/monitoring/paper_portfolio.py` implements a separate single-instrument, quote-currency portfolio using fixture events. The freeze includes strategy and execution versions, evaluation start, risk, margin, spread, fees and position limits. A decision can enter only when a later valid bid/ask quote was both generated and observed after it. Session closures, stale quotes and missing quote intervals cancel pending intents. A position exposed to an unresolved gap can book an adverse stop on an observed quote. Target and time exits stay suspended for that position. Closed positions that crossed a gap retain an uncertainty flag.
+
+The engine books round-trip commission at entry and explicit per-unit financing on open positions. It marks equity using executable sides with adverse slippage. Fixed leverage models margin and nominal risk sizing uses the stop, exit slippage and commission. The maximum risk fraction per intent is 0.25%. Adverse gaps can exceed nominal risk. The engine has no broker liquidation, multi-currency or market-depth model.
+
+`append_fixture_events` uses a dedicated SQLite file. It atomically saves events and the reconciled projection, including position and cash transactions. Exact retries are idempotent and conflicting IDs fail. It verifies the saved projection by deterministic full replay on every batch. This trades throughput for simplicity and is intended for bounded fixture streams. The portfolio does not consume the forward adapter and has no broker API or trading CLI.
+
+```powershell
+python scripts/run_shadow_diagnostics.py --journal runtime/shadow.sqlite3 --events
+```
+
+The read-only adapter exports JSON lines with original poll and bar IDs, market source, model, timing, session, gap, quote and decision fields. Malformed records or inconsistent rollover links are invalid. Current MT5 records are diagnostics only. Validated status is available exclusively to test fixtures with an explicit source, session, model, poll cutoff and evaluation start. The CLI supplies no trust override.
+
 The Windows deployment keeps its original DPAPI pairing files and pause flag under the original checkout's `mt5-ai-bot/runtime`. The smoke CLI resolves that same runtime under the current Windows profile independently of the working directory. Execution requires a pre-existing valid ledger, a reviewed pin, and all other order gates. The CLI refuses to provision an account pin pending canonical runtime and broker history review.

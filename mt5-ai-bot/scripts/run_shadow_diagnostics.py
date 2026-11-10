@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.monitoring.shadow_diagnostics import ProspectiveJournal, export_forward
 from src.monitoring.forward_audit import audit_forward
+from src.monitoring.forward_adapter import read_forward_events
 
 
 def main():
@@ -21,12 +22,17 @@ def main():
     read = parser.add_mutually_exclusive_group()
     read.add_argument("--export", action="store_true", help="Print the journal without MT5")
     read.add_argument("--audit", action="store_true", help="Check journal integrity and rollover decisions")
+    read.add_argument("--events", action="store_true", help="Print classified read-only journal events as JSON lines")
     parser.add_argument("--format", choices=("json", "csv"), default="json")
     args = parser.parse_args()
     if args.audit:
         result = audit_forward(args.journal)
         print(json.dumps(result, indent=2))
         return 0 if result["integrity_ok"] and result["source_bound"] and not result["issues"] else 1
+    if args.events:
+        for event in read_forward_events(args.journal):
+            print(json.dumps(event))
+        return
     if args.export:
         data = export_forward(args.journal)
         if args.format == "json":
