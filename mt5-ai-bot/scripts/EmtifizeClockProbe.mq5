@@ -25,9 +25,9 @@ void OnStart()
       {
          MqlTick tick = {};
          if(SymbolInfoTick(symbols[i], tick))
-            PrintFormat("EMT_CLOCK tick sample=%d symbol=%s elapsed_ms=%I64u time=%I64d time_msc=%I64d",
+            PrintFormat("EMT_CLOCK tick sample=%d symbol=%s elapsed_ms=%I64u time=%I64d time_msc=%I64d bid=%.8f ask=%.8f flags=%u",
                         sample, symbols[i], GetTickCount64() - started,
-                        (long)tick.time, tick.time_msc);
+                        (long)tick.time, tick.time_msc, tick.bid, tick.ask, tick.flags);
          else
             PrintFormat("EMT_CLOCK missing sample=%d symbol=%s", sample, symbols[i]);
       }

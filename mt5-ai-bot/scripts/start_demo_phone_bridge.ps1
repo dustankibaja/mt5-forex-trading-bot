@@ -2,11 +2,13 @@
 # Requires Python venv, MT5 demo account, and optional Tailscale on PC/phone.
 # Does not place ANY orders, does not configure a publicly accessible service.
 param(
-    [int] $Port = 8787
+    [int] $Port = 8787,
+    [string] $DeploymentDirectory = (Join-Path $PSScriptRoot '..'),
+    [switch] $SkipPairingQr
 )
 
 $ErrorActionPreference = 'Stop'
-$botDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$botDir = (Resolve-Path -LiteralPath $DeploymentDirectory).Path
 Set-Location $botDir
 $python = Join-Path $botDir '.venv\Scripts\python.exe'
 
@@ -76,12 +78,14 @@ try {
     $quotedApiPath = '"' + (Join-Path $PSScriptRoot 'serve_status.py') + '"'
     $quotedWorkerPath = '"' + (Join-Path $PSScriptRoot 'run_live.py') + '"'
     $api = Start-Process -FilePath $python `
+        -WindowStyle Hidden `
         -ArgumentList "$quotedApiPath --port $Port" `
         -WorkingDirectory $botDir -PassThru `
         -RedirectStandardOutput (Join-Path $logDir 'demo-api-out.log') `
         -RedirectStandardError (Join-Path $logDir 'demo-api-error.log')
 
     $worker = Start-Process -FilePath $python `
+        -WindowStyle Hidden `
         -ArgumentList "$quotedWorkerPath --dry-run --require-demo" `
         -WorkingDirectory $botDir -PassThru `
         -RedirectStandardOutput (Join-Path $logDir 'demo-worker-out.log') `
@@ -171,7 +175,9 @@ try {
     $serveOutput = & tailscale serve status 2>$null | Out-String
     $matchesFound = [regex]::Matches($serveOutput,
         'https://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.ts\.net')
-    if ($matchesFound.Count -gt 0) {
+    if ($SkipPairingQr) {
+        Write-Host 'Using existing pairing credentials.'
+    } elseif ($matchesFound.Count -gt 0) {
         $env:EMTIFIZE_PAIR_URL = $matchesFound[0].Value.TrimEnd('/')
         Write-Host 'Opening LOCAL PRIVATE pairing QR window on Windows...' -ForegroundColor Cyan
         $quotedQrScript = '"' + (Join-Path $PSScriptRoot 'show_pairing_qr.py') + '"'
