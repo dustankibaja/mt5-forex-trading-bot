@@ -11,6 +11,10 @@ def indicators(side_bars: pd.DataFrame) -> pd.DataFrame:
     df = pd.DataFrame(index=side_bars.index)
     for field in ("open", "high", "low", "close"):
         df[field] = (side_bars["bid_" + field] + side_bars["ask_" + field]) / 2
+    return price_indicators(df)
+
+
+def price_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = enrich(df)
     df["ema200"] = df.close.ewm(span=200, adjust=False).mean()
     df["atr60_median_prior"] = df.atr14.rolling(60).median().shift(1)

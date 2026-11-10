@@ -15,6 +15,7 @@ def simulate(
     *, starting_balance: float = 10000.0,
     spread_pips: float = 1.2, slippage_side_pips: float = 0.2,
     commission_roundtrip_per_lot: float = 7.0,
+    include_trades: bool = False,
 ) -> dict[str, Any]:
     """Signal at previous close, entry at next open; stop-first within bars.
 
@@ -138,7 +139,7 @@ def simulate(
     win = [t for t in trades if t["pnl"] > 0]
     gain = sum(t["pnl"] for t in win)
     loss = -sum(t["pnl"] for t in trades if t["pnl"] < 0)
-    return {
+    result = {
         "strategy": strategy,
         "trades": len(trades),
         "net_return_pct": round(100 * (bal / starting_balance - 1), 4),
@@ -150,3 +151,6 @@ def simulate(
         "gap_stops": sum(t["exit_reason"] == "gap_stop" for t in trades),
         "time_exits": sum(t["exit_reason"] in ("timeout", "period_end") for t in trades),
     }
+    if include_trades:
+        result["trade_log"] = trades
+    return result
