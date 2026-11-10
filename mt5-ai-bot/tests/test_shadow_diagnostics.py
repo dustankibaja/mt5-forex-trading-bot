@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from src.monitoring.shadow_diagnostics import ProspectiveJournal, export, export_forward, observe
+from src.monitoring.forward_audit import audit_forward
 
 
 class DemoFeed:
@@ -118,3 +119,56 @@ def test_restarted_journal_rejects_different_demo_identity(tmp_path):
     with pytest.raises(RuntimeError, match="different DEMO source"):
         ProspectiveJournal(path).poll(feed)
     assert len(export_forward(path)["forward"]) == 1
+
+
+def test_audit_counts_zero_once_after_restart_and_long_gap(tmp_path, monkeypatch):
+    now = [100]
+    monkeypatch.setattr("src.monitoring.shadow_diagnostics.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("src.monitoring.shadow_diagnostics.time.time", lambda: 1_800_000_000 + now[0])
+    path = tmp_path / "forward.sqlite3"
+    feed = ForwardFeed()
+    journal = ProspectiveJournal(path)
+    journal.poll(feed)
+    now[0] += 15
+    feed.offset = 1
+    journal.poll(feed)
+    journal = ProspectiveJournal(path)
+    now[0] += 15
+    feed.offset = 0
+    journal.poll(feed)
+    now[0] += 15
+    feed.offset = 1
+    journal.poll(feed)
+    now[0] += 90
+    feed.offset = 2
+    journal.poll(feed)
+
+    result = audit_forward(path)
+    assert result["integrity_ok"] and result["source_bound"]
+    assert result["polls"] == 5
+    assert result["rollovers"] == 1
+    assert result["decisions"] == {"0": 1}
+    assert result["restart_transitions"] == 1
+    assert result["gaps"] == {"restart_or_poll_gap": 2}
+    assert result["issues"] == {}
+
+
+def test_audit_flags_missing_bar_index_even_when_sqlite_is_healthy(tmp_path, monkeypatch):
+    import sqlite3
+    from contextlib import closing
+
+    now = [100]
+    monkeypatch.setattr("src.monitoring.shadow_diagnostics.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("src.monitoring.shadow_diagnostics.time.time", lambda: 1_800_000_000 + now[0])
+    path = tmp_path / "forward.sqlite3"
+    feed = ForwardFeed()
+    journal = ProspectiveJournal(path)
+    journal.poll(feed)
+    now[0] += 15
+    feed.offset = 1
+    journal.poll(feed)
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("DELETE FROM forward_bars")
+    result = audit_forward(path)
+    assert result["integrity_ok"]
+    assert result["issues"] == {"bar_index_mismatch": 1}
