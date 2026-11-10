@@ -28,6 +28,7 @@ def simulate(
     commission_per_lot: float = 7.0,
     initial_cash: float = 10000.0,
     spread_limit_pips: float = 2.0,
+    include_trades: bool = False,
 ) -> dict:
     begin = int(side.index.searchsorted(pd.Timestamp(start, tz="UTC")))
     finish = int(side.index.searchsorted(pd.Timestamp(end, tz="UTC")))
@@ -166,7 +167,7 @@ def simulate(
 
     gains = sum(t["pnl_usd"] for t in trades if t["pnl_usd"] > 0)
     losses = -sum(t["pnl_usd"] for t in trades if t["pnl_usd"] < 0)
-    return {
+    result = {
         "hypothesis": hypothesis,
         "trades": len(trades),
         "net_return_pct": round(100 * (cash / initial_cash - 1), 4),
@@ -177,3 +178,6 @@ def simulate(
         "spread_skips": spread_skips,
         "end_balance_usd": round(cash, 2),
     }
+    if include_trades:
+        result["trade_log"] = trades
+    return result
