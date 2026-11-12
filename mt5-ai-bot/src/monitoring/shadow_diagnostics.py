@@ -80,8 +80,9 @@ def export(journal):
 class ProspectiveJournal:
     """Observe a bar close only when this process sees its rollover."""
 
-    def __init__(self, path):
+    def __init__(self, path, *, existing_only=False):
         self.path = path
+        self.existing_only = existing_only
         self.session = uuid.uuid4().hex
         self.identity = None
 
@@ -138,12 +139,15 @@ class ProspectiveJournal:
 
     def _persist(self, row, prices):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(self.path)) as db, db:
+        target = self.path.resolve().as_uri() + "?mode=rw" if self.existing_only else self.path
+        with closing(sqlite3.connect(target, uri=self.existing_only)) as db, db:
             db.execute("PRAGMA synchronous=FULL")
             db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS forward_source (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1), salt TEXT, digest TEXT)""")
             binding = db.execute("SELECT salt, digest FROM forward_source WHERE singleton=1").fetchone()
+            if self.existing_only and not binding:
+                raise RuntimeError("Forward journal identity binding missing")
             salt = binding[0] if binding else uuid.uuid4().hex
             identity = json.dumps(self.identity, separators=(",", ":"))
             digest = hashlib.sha256((salt + identity).encode()).hexdigest()

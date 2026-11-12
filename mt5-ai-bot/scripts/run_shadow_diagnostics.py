@@ -6,12 +6,14 @@ import csv
 import json
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.monitoring.shadow_diagnostics import ProspectiveJournal, export_forward
 from src.monitoring.forward_audit import audit_forward
 from src.monitoring.forward_adapter import read_forward_events
+from src.monitoring.recovery import windows_lock
 
 
 def main():
@@ -50,19 +52,24 @@ def main():
         parser.error("--terminal is required for sampling")
     import MetaTrader5 as mt5
 
-    if not mt5.initialize(str(args.terminal), timeout=5000):
-        raise SystemExit("MT5 attachment failed")
-    journal = ProspectiveJournal(args.journal)
-    try:
-        while True:
-            print(json.dumps(journal.poll(mt5)), flush=True)
-            if not args.watch:
-                break
-            time.sleep(15)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        mt5.shutdown()
+    lock = nullcontext()
+    if sys.platform == "win32":
+        args.journal.parent.mkdir(parents=True, exist_ok=True)
+        lock = windows_lock(args.journal.resolve().with_suffix(".lock"))
+    with lock:
+        if not mt5.initialize(str(args.terminal), timeout=5000):
+            raise SystemExit("MT5 attachment failed")
+        journal = ProspectiveJournal(args.journal)
+        try:
+            while True:
+                print(json.dumps(journal.poll(mt5)), flush=True)
+                if not args.watch:
+                    break
+                time.sleep(15)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            mt5.shutdown()
 
 
 if __name__ == "__main__":

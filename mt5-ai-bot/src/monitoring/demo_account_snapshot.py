@@ -63,7 +63,8 @@ def invalidate_demo_snapshot(path: str | Path, *, now: datetime | None = None) -
     _write(path, _unavailable_record(now))
 
 
-def capture_demo_snapshot(api, path: str | Path, *, now: datetime | None = None) -> bool:
+def capture_demo_snapshot(api, path: str | Path, *, now: datetime | None = None,
+                          expected_identity: tuple[int, str] | None = None) -> bool:
     """Capture only broker-verified DEMO account, no orders and no login data.
 
     Failures invalidate the previous snapshot, so broker disconnection or
@@ -75,7 +76,8 @@ def capture_demo_snapshot(api, path: str | Path, *, now: datetime | None = None)
         account = api.account_info()
         if (terminal is None or not getattr(terminal, "connected", False)
                 or account is None
-                or getattr(account, "trade_mode", None) != api.ACCOUNT_TRADE_MODE_DEMO):
+                or getattr(account, "trade_mode", None) != api.ACCOUNT_TRADE_MODE_DEMO
+                or expected_identity is not None and (account.login, account.server) != expected_identity):
             invalidate_demo_snapshot(path, now=current)
             return False
 
@@ -141,6 +143,14 @@ def capture_demo_snapshot(api, path: str | Path, *, now: datetime | None = None)
             "positions": pos_rows,
             "recent_closing_deals": deal_rows,
         }
+        if expected_identity is not None:
+            current_account = api.account_info()
+            terminal = api.terminal_info()
+            if (not terminal or not terminal.connected or not current_account
+                    or current_account.trade_mode != api.ACCOUNT_TRADE_MODE_DEMO
+                    or (current_account.login, current_account.server) != expected_identity):
+                invalidate_demo_snapshot(path, now=current)
+                return False
         _write(path, record)
         return True
     except (ValueError, TypeError, AttributeError, KeyError, OverflowError, OSError):
