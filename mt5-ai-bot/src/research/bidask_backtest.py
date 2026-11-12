@@ -29,6 +29,8 @@ def simulate(
     initial_cash: float = 10000.0,
     spread_limit_pips: float = 2.0,
     include_trades: bool = False,
+    directions: pd.Series | None = None,
+    carry_per_lot: float = 0.0,
 ) -> dict:
     begin = int(side.index.searchsorted(pd.Timestamp(start, tz="UTC")))
     finish = int(side.index.searchsorted(pd.Timestamp(end, tz="UTC")))
@@ -36,6 +38,11 @@ def simulate(
         raise ValueError("Missing test interval")
     if not side.index.equals(mid.index):
         raise ValueError("Bid-ask data and indicators must have identical timestamps")
+    if directions is not None and (not side.index.equals(directions.index)
+                                   or not directions.isin((-1, 0, 1)).all()):
+        raise ValueError("Directions must be aligned and ternary")
+    if not math.isfinite(carry_per_lot) or carry_per_lot < 0:
+        raise ValueError("Carry must be finite and nonnegative")
 
     values = {field: side[field].to_numpy() for field in side.columns}
     atr = mid.atr14.to_numpy()
@@ -44,11 +51,16 @@ def simulate(
     day, day_pnl, day_count = "", 0.0, 0
     slip = PIP * slippage_pips
     spread_skips = 0
+    roll_day = (side.index - pd.Timedelta(hours=22)).normalize()
+
+    def costs(p, idx):
+        return (commission_per_lot + carry_per_lot *
+                (roll_day[idx] - roll_day[p["opened"]]).days) * p["lots"]
 
     def fill_close(p, px, idx, reason):
         pnl = ((px - p["entry"]) * p["direction"] / PIP
                * USD_PER_PIP_PER_LOT * p["lots"]
-               - commission_per_lot * p["lots"])
+               - costs(p, idx))
         trades.append({
             "pnl_usd": pnl,
             "r": pnl / p["risk_usd"],
@@ -115,7 +127,8 @@ def simulate(
             if not (math.isfinite(spread) and 0 <= spread <= spread_limit_pips):
                 spread_skips += 1
             else:
-                direction = signal(mid, i - 1, hypothesis)
+                direction = (signal(mid, i - 1, hypothesis) if directions is None
+                             else int(directions.iat[i - 1]))
                 stop_distance = 1.5 * atr[i - 1]
                 if direction and stop_distance > PIP:
                     # Executable ask for long, bid for short; risk assessed
@@ -155,7 +168,7 @@ def simulate(
             marked += (
                 (liquidation - pos["entry"]) * pos["direction"] / PIP
                 * USD_PER_PIP_PER_LOT * pos["lots"]
-                - commission_per_lot * pos["lots"]
+                - costs(pos, i)
             )
         peak = max(peak, marked)
         worst_dd = max(worst_dd, (peak - marked) / peak * 100)

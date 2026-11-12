@@ -53,6 +53,22 @@ def test_flat_market_never_trades_and_result_deterministic():
         assert a["trades"] == 0
 
 
+def test_frozen_direction_uses_next_open_and_carry_counts_boundaries():
+    side = fixed_side()
+    mid = indicators(side)
+    directions = pd.Series(0, index=side.index)
+    directions.iloc[211] = 1
+    options = dict(directions=directions, include_trades=True)
+    base = simulate(side, mid, "fixture", "2025-01-01", "2025-01-15", **options)
+    stress = simulate(side, mid, "fixture", "2025-01-01", "2025-01-15",
+                      carry_per_lot=10, **options)
+    trade, charged = base["trade_log"][0], stress["trade_log"][0]
+    assert trade["entry_at"] == str(side.index[212])
+    assert trade["exit_at"] == charged["exit_at"] == str(side.index[260])
+    # $50 risk / $39 per lot, rounded down to 1.28 lots. Two UTC boundaries.
+    assert trade["pnl_usd"] - charged["pnl_usd"] == pytest.approx(2 * 10 * 1.28)
+
+
 def test_signal_cannot_see_future_data():
     side = fixed_side()
     baseline = indicators(side)
