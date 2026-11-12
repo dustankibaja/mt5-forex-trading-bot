@@ -91,3 +91,19 @@ def test_active_preview_keeps_partial_tail_outside_the_journal(tmp_path):
     assert data["last_tick"]["receipt_minus_provider_ms"] == 2
     assert data["last_tick"]["bid"] == "1.1000"
     assert not data["closed"]
+
+
+def test_active_checkpoint_is_idempotent_and_resumes_through_seal(tmp_path):
+    path, db = tmp_path / "capture.tsv", tmp_path / "capture.sqlite"
+    run = spool(path, [("connected", 0, (), 0), ("end", 0, (), 0)])
+    sealed = path.read_bytes()
+    path.write_bytes(sealed[:-1])
+    result = ingest(path, db, active_prefix=True)
+    assert result["inserted"] == 1 and not result["closed"]
+    assert ingest(path, db, active_prefix=True)["inserted"] == 0
+    path.write_bytes(sealed)
+    assert ingest(path, db)["inserted"] == 1
+    assert [e.kind for e in replay(db, run)] == ["connected", "end"]
+    path.write_bytes(sealed.splitlines(keepends=True)[0])
+    with pytest.raises(ValueError, match="membership"):
+        ingest(path, db, active_prefix=True)

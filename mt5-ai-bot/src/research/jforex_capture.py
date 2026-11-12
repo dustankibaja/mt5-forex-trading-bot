@@ -58,8 +58,8 @@ def decode(line: bytes) -> Observation:
     return Observation(source, run, int(seq), kind, int(raw), int(utc), int(mono), int(dropped), numbers)
 
 
-def ingest(spool: Path, journal: Path) -> dict:
-    """Idempotent transactional import of one immutable, closed spool."""
+def ingest(spool: Path, journal: Path, *, active_prefix: bool = False) -> dict:
+    """Import a sealed spool or explicitly checkpoint its complete active records."""
     if spool.resolve() == journal.resolve():
         raise ValueError("Capture and research journal must be distinct")
     with spool.open("rb") as stream, closing(sqlite3.connect(journal)) as db, db:
@@ -73,6 +73,8 @@ def ingest(spool: Path, journal: Path) -> dict:
         seen = inserted = 0
         first = previous = None
         for line in iter(lambda: stream.readline(1025), b""):
+            if active_prefix and not line.endswith(b"\n") and len(line) <= 1024:
+                break
             item = decode(line)
             first = first or item
             if (item.run != first.run or item.source != first.source or
@@ -87,12 +89,13 @@ def ingest(spool: Path, journal: Path) -> dict:
                 raise ValueError("Immutable event ID collision")
             seen += 1
             previous = item
-        if previous is None or previous.kind != "end":
+        if previous is None or (not active_prefix and previous.kind != "end"):
             raise ValueError("Spool missing a clean end marker")
         count = db.execute("SELECT COUNT(*) FROM capture_events WHERE run=?", (previous.run,)).fetchone()[0]
         if count != seen:
             raise ValueError("Conflicting sealed run membership")
-    return {"run": first.run, "source": first.source, "seen": seen, "inserted": inserted}
+    return {"run": first.run, "source": first.source, "seen": seen, "inserted": inserted,
+            "closed": previous.kind == "end"}
 
 
 def valid_price(value):
@@ -103,6 +106,66 @@ def replay(journal: Path, run: str):
     with closing(sqlite3.connect(journal.resolve().as_uri() + "?mode=ro", uri=True)) as db:
         for (line,) in db.execute("SELECT line FROM capture_events WHERE run=? ORDER BY sequence", (run,)):
             yield decode(line)
+
+
+def diagnostic_stats(events, *, preceding_sequence=0):
+    """Describe observed delivery ages and paired candles without certifying a run."""
+    from math import ceil
+    from statistics import median
+
+    counts = Counter()
+    ages = []
+    first = previous = None
+    longest_ns = 0
+    duplicates = set()
+    bar_times = set()
+    last_bar = None
+    bars = []
+    last_sequence = preceding_sequence
+    for e in events:
+        counts[e.kind] += 1
+        counts["sequence_gaps"] += max(0, e.sequence - last_sequence - 1)
+        last_sequence = e.sequence
+        counts["queue_drops"] = max(counts["queue_drops"], e.dropped)
+        if e.kind == "tick":
+            bid, ask = e.prices
+            age = e.utc_ms - e.raw_ms
+            ages.append(age)
+            counts["negative_age"] += age < 0
+            counts["outside_age_gate"] += not -100 <= age <= 2000
+            counts["invalid_bid_ask"] += not (valid_price(bid) and valid_price(ask) and bid <= ask)
+            key = e.raw_ms, tuple(map(str, e.prices))
+            counts["duplicate_ticks"] += key in duplicates
+            duplicates.add(key)
+            first = first or e
+            if previous:
+                counts["provider_time_regressions"] += e.raw_ms < previous.raw_ms
+                counts["monotonic_regressions"] += e.monotonic_ns < previous.monotonic_ns
+                longest_ns = max(longest_ns, e.monotonic_ns - previous.monotonic_ns)
+            previous = e
+        elif e.kind == "h1":
+            duplicate = e.raw_ms in bar_times
+            counts["duplicate_h1"] += duplicate
+            counts["h1_time_regressions"] += last_bar is not None and e.raw_ms < last_bar
+            bar_times.add(e.raw_ms)
+            last_bar = e.raw_ms
+            bid, ask = e.prices[:4], e.prices[4:]
+            geometry = all(valid_price(p) for p in e.prices) and all(
+                low <= min(open_, close) <= max(open_, close) <= high
+                for open_, high, low, close in (bid, ask))
+            bars.append({"open_utc": datetime.fromtimestamp(e.raw_ms / 1000, timezone.utc).isoformat(),
+                         "bid_ohlc": list(map(str, bid)), "ask_ohlc": list(map(str, ask)),
+                         "aligned_utc_hour": e.raw_ms % HOUR == 0,
+                         "valid_geometry": geometry, "duplicate": duplicate,
+                         "receipt_minus_bar_end_ms": e.utc_ms - e.raw_ms - HOUR})
+    duration = (previous.monotonic_ns - first.monotonic_ns) / 1e9 if first else 0
+    ages.sort()
+    age_summary = ({"min": ages[0], "median": median(ages), "p95": ages[ceil(.95 * len(ages)) - 1],
+                    "p99": ages[ceil(.99 * len(ages)) - 1], "max": ages[-1]} if ages else None)
+    return {"counts": dict(counts), "first_tick": tick_evidence(first), "last_tick": tick_evidence(previous),
+            "tick_span_seconds": duration, "ticks_per_second": (len(ages) - 1) / duration if duration > 0 else None,
+            "longest_intertick_seconds": longest_ns / 1e9, "receipt_minus_provider_ms": age_summary,
+            "h1_callbacks": bars}
 
 
 def preview(spool: Path, *, line_limit=100_000) -> dict:
@@ -288,16 +351,21 @@ def main():
     parser.add_argument("spool", type=Path)
     parser.add_argument("journal", type=Path, nargs="?")
     parser.add_argument("--preview", action="store_true")
+    parser.add_argument("--active-prefix", action="store_true",
+                        help="Checkpoint an open spool without qualifying it")
     args = parser.parse_args()
     if args.preview:
-        if args.journal:
+        if args.journal or args.active_prefix:
             parser.error("--preview does not write to a journal")
         print(json.dumps(preview(args.spool), indent=2))
         return
     if args.journal is None:
         parser.error("a dedicated journal is required for sealed import")
-    result = ingest(args.spool, args.journal)
-    print(json.dumps({"ingest": result, "assessment": assess(replay(args.journal, result["run"]))}, indent=2))
+    result = ingest(args.spool, args.journal, active_prefix=args.active_prefix)
+    report = {"ingest": result, "assessment": assess(replay(args.journal, result["run"]))}
+    if args.active_prefix:
+        report["diagnostic"] = diagnostic_stats(replay(args.journal, result["run"]))
+    print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":

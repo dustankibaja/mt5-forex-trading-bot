@@ -159,10 +159,11 @@ public final class DemoCollector implements IStrategy {
             System.exit(2);
         }
         char[] password = null;
+        Console console = System.console();
+        String phase = "opening credential prompt";
         try {
             int seconds = Integer.parseInt(args[1]);
             if (seconds < 1 || seconds > 7 * 24 * 3600) throw new IllegalArgumentException();
-            Console console = System.console();
             char[] loginChars;
             if (console != null) {
                 loginChars = console.readPassword("Authorized JForex DEMO login (hidden): ");
@@ -179,7 +180,8 @@ public final class DemoCollector implements IStrategy {
                 loginField.setText("");
                 passField.setText("");
             }
-            if (loginChars == null) throw new IllegalArgumentException();
+            phase = "checking credential entry";
+            if (loginChars == null) return;
             String login = new String(loginChars);
             Arrays.fill(loginChars, '\0');
             if (login == null || login.isBlank() || password == null || password.length == 0)
@@ -189,11 +191,22 @@ public final class DemoCollector implements IStrategy {
             System.setOut(new PrintStream(OutputStream.nullOutputStream()));
             System.setErr(new PrintStream(OutputStream.nullOutputStream()));
             operator.println("Connecting to Dukascopy DEMO. Credentials are hidden.");
+            phase = "starting or running the DEMO collector";
             run(Path.of(args[0]), seconds, args.length == 2, login, password);
             operator.println("Diagnostic capture closed.");
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
             // Vendor exception messages can contain account information.
-            operator.println("DEMO collector stopped: " + e.getClass().getSimpleName());
+            String status = "DEMO collector stopped while " + phase + " (" + e.getClass().getSimpleName() + ").";
+            operator.println(status);
+            try {
+                Path capture = Path.of(args[0]);
+                Files.writeString(capture.resolveSibling(capture.getFileName() + ".status.txt"),
+                                  status + System.lineSeparator(), StandardOpenOption.CREATE_NEW);
+            } catch (Exception ignored) {
+                // The visible prompt remains available if the capture directory is unwritable.
+            }
+            if (console == null)
+                JOptionPane.showMessageDialog(null, status, "Emtifize JForex DEMO", JOptionPane.ERROR_MESSAGE);
             System.exit(1);
         } finally { if (password != null) Arrays.fill(password, '\0'); }
     }
