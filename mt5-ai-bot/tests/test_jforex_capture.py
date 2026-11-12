@@ -4,7 +4,7 @@ import pytest
 
 from decimal import Decimal as D
 
-from src.research.jforex_capture import HOUR, Observation, assess, ingest, replay
+from src.research.jforex_capture import HOUR, Observation, assess, ingest, preview, replay
 
 BASE = 1767600000000
 
@@ -77,3 +77,17 @@ def test_paired_bar_matches_observed_sides_and_cannot_certify_short_run():
     assert result["matching_paired_hours"] == 1
     assert result["trust"] == "quarantined"
     assert not result["observed_thresholds_met"]
+
+
+def test_active_preview_keeps_partial_tail_outside_the_journal(tmp_path):
+    path = tmp_path / "capture.tsv"
+    spool(path, [("demo_account_connected", 0, (), 0),
+                 ("tick", BASE, ("1.1000", "1.1002"), 0)])
+    with path.open("ab") as stream:
+        stream.write(b"partial")
+    data = preview(path)
+    assert data["trust"] == "diagnostic_only"
+    assert data["counts"]["demo_account_connected"] == 1
+    assert data["last_tick"]["receipt_minus_provider_ms"] == 2
+    assert data["last_tick"]["bid"] == "1.1000"
+    assert not data["closed"]

@@ -15,7 +15,8 @@ HOUR = 3_600_000
 POLICY = "jforex-acceptance-v1"
 KINDS = {name: 0 for name in ("connecting", "connected", "subscribed", "disconnected",
                             "reconnecting", "heartbeat", "strategy_started", "strategy_stopped",
-                            "gap", "end", "collector_fault")}
+                            "gap", "end", "collector_fault", "demo_account_connected",
+                            "warmup_written", "warmup_unavailable")}
 KINDS.update(tick=2, h1=8)
 
 
@@ -102,6 +103,49 @@ def replay(journal: Path, run: str):
     with closing(sqlite3.connect(journal.resolve().as_uri() + "?mode=ro", uri=True)) as db:
         for (line,) in db.execute("SELECT line FROM capture_events WHERE run=? ORDER BY sequence", (run,)):
             yield decode(line)
+
+
+def preview(spool: Path, *, line_limit=100_000) -> dict:
+    """Inspect a bounded prefix of an open capture without promoting or importing it."""
+    counts = Counter()
+    first_tick = last_tick = None
+    paired = 0
+    previous = None
+    with spool.open("rb") as stream:
+        for _ in range(line_limit):
+            line = stream.readline(1025)
+            if not line or (not line.endswith(b"\n") and len(line) <= 1024):
+                break
+            item = decode(line)
+            if previous and (item.run != previous.run or item.source != previous.source
+                             or item.sequence <= previous.sequence or previous.kind == "end"):
+                raise ValueError("Capture prefix order or provenance changed")
+            previous = item
+            counts[item.kind] += 1
+            if item.kind == "tick":
+                first_tick = first_tick or item
+                last_tick = item
+            elif item.kind == "h1":
+                paired += 1
+    return {
+        "source": previous.source if previous else None,
+        "trust": "diagnostic_only",
+        "counts": dict(counts),
+        "first_tick": tick_evidence(first_tick),
+        "last_tick": tick_evidence(last_tick),
+        "paired_h1_callbacks": paired,
+        "closed": bool(previous and previous.kind == "end"),
+        "prefix_limit": line_limit,
+    }
+
+
+def tick_evidence(item):
+    if item is None:
+        return None
+    bid, ask = item.prices
+    return {"raw_provider_ms": item.raw_ms, "host_utc_ms": item.utc_ms,
+            "host_monotonic_ns": item.monotonic_ns, "bid": str(bid), "ask": str(ask),
+            "receipt_minus_provider_ms": item.utc_ms - item.raw_ms}
 
 
 def assess(events) -> dict:
@@ -242,8 +286,16 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("spool", type=Path)
-    parser.add_argument("journal", type=Path)
+    parser.add_argument("journal", type=Path, nargs="?")
+    parser.add_argument("--preview", action="store_true")
     args = parser.parse_args()
+    if args.preview:
+        if args.journal:
+            parser.error("--preview does not write to a journal")
+        print(json.dumps(preview(args.spool), indent=2))
+        return
+    if args.journal is None:
+        parser.error("a dedicated journal is required for sealed import")
     result = ingest(args.spool, args.journal)
     print(json.dumps({"ingest": result, "assessment": assess(replay(args.journal, result["run"]))}, indent=2))
 
