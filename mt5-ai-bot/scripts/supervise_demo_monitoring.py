@@ -67,22 +67,32 @@ def read_existing_token(runtime):
     token_path = runtime / "read-token.dpapi"
     if not token_path.is_file():
         raise RecoveryBlocked("existing_pairing_token_required")
-    command = (
-        "$ErrorActionPreference='Stop'; "
-        "$cipher=(Get-Content -LiteralPath $env:EMTIFIZE_DPAPI_FILE -Raw -Encoding UTF8).Trim(); "
-        "$secure=ConvertTo-SecureString -String $cipher; "
-        "$ptr=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure); "
-        "try {[Console]::Write([Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr))} "
-        "finally {[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)}"
-    )
-    result = subprocess.run(
-        [str(Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"),
-         "-NoProfile", "-NonInteractive", "-Command", command],
-        env={**os.environ, "EMTIFIZE_DPAPI_FILE": str(token_path)}, capture_output=True,
-        text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW,
-    )
-    token = result.stdout.strip()
-    if result.returncode or len(token) < 32 or not token.isascii() or any(c.isspace() for c in token):
+    class Blob(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("data", ctypes.c_void_p)]
+
+    try:
+        cipher = bytes.fromhex(token_path.read_text(encoding="utf-8-sig"))
+        buffer = ctypes.create_string_buffer(cipher)
+        source = Blob(len(cipher), ctypes.addressof(buffer))
+        output = Blob()
+        dpapi = ctypes.WinDLL("crypt32", use_last_error=True)
+        decrypt = dpapi.CryptUnprotectData
+        decrypt.argtypes = [ctypes.POINTER(Blob), ctypes.c_void_p, ctypes.c_void_p,
+                            ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(Blob)]
+        decrypt.restype = wintypes.BOOL
+        if not decrypt(ctypes.byref(source), None, None, None, None, 1, ctypes.byref(output)):
+            raise RecoveryBlocked("existing_pairing_token_unavailable")
+        try:
+            token = ctypes.string_at(output.data, output.size).decode("utf-16-le")
+        finally:
+            ctypes.memset(output.data, 0, output.size)
+            free = ctypes.WinDLL("kernel32").LocalFree
+            free.argtypes = [ctypes.c_void_p]
+            free.restype = ctypes.c_void_p
+            free(output.data)
+    except (OSError, ValueError):
+        raise RecoveryBlocked("existing_pairing_token_unavailable") from None
+    if len(token) < 32 or not token.isascii() or any(c.isspace() for c in token):
         raise RecoveryBlocked("existing_pairing_token_unavailable")
     return token
 
