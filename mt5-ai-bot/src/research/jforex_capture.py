@@ -16,7 +16,7 @@ POLICY = "jforex-acceptance-v1"
 KINDS = {name: 0 for name in ("connecting", "connected", "subscribed", "disconnected",
                             "reconnecting", "heartbeat", "strategy_started", "strategy_stopped",
                             "gap", "end", "collector_fault", "demo_account_connected",
-                            "warmup_written", "warmup_unavailable")}
+                            "warmup_written", "warmup_unavailable", "instrument_unavailable")}
 KINDS.update(tick=2, h1=8)
 
 
@@ -31,6 +31,7 @@ class Observation:
     monotonic_ns: int
     dropped: int
     prices: tuple[Decimal, ...]
+    producer: str = "collector-1"
 
     @property
     def event_id(self):
@@ -44,7 +45,7 @@ def decode(line: bytes) -> Observation:
     if len(fields) < 11:
         raise ValueError("Missing spool fields")
     version, source, producer, run, seq, kind, raw, utc, mono, dropped, symbol, *prices = fields
-    if (version != "1" or producer != "collector-1" or source not in {"synthetic", "jforex_demo"}
+    if (version != "1" or producer not in {"collector-1", "collector-2"} or source not in {"synthetic", "jforex_demo"}
             or symbol != "EURUSD" or KINDS.get(kind) != len(prices) or str(uuid.UUID(run)) != run):
         raise ValueError("Unexpected event schema or provenance")
     if any(not s.isascii() or not s.isdigit() or len(s) > 18 for s in (seq, raw, utc, mono, dropped)):
@@ -55,7 +56,7 @@ def decode(line: bytes) -> Observation:
         numbers = tuple(Decimal(price) for price in prices)
     except InvalidOperation:
         raise ValueError("Invalid price representation") from None
-    return Observation(source, run, int(seq), kind, int(raw), int(utc), int(mono), int(dropped), numbers)
+    return Observation(source, run, int(seq), kind, int(raw), int(utc), int(mono), int(dropped), numbers, producer)
 
 
 def ingest(spool: Path, journal: Path, *, active_prefix: bool = False) -> dict:
@@ -77,7 +78,7 @@ def ingest(spool: Path, journal: Path, *, active_prefix: bool = False) -> dict:
                 break
             item = decode(line)
             first = first or item
-            if (item.run != first.run or item.source != first.source or
+            if (item.run != first.run or item.source != first.source or item.producer != first.producer or
                     (previous and (item.sequence <= previous.sequence or previous.kind == "end"))):
                 raise ValueError("Spool run or ordering changed")
             prior = db.execute("SELECT line FROM capture_events WHERE run=? AND sequence=?",
@@ -94,7 +95,7 @@ def ingest(spool: Path, journal: Path, *, active_prefix: bool = False) -> dict:
         count = db.execute("SELECT COUNT(*) FROM capture_events WHERE run=?", (previous.run,)).fetchone()[0]
         if count != seen:
             raise ValueError("Conflicting sealed run membership")
-    return {"run": first.run, "source": first.source, "seen": seen, "inserted": inserted,
+    return {"run": first.run, "source": first.source, "producer": first.producer, "seen": seen, "inserted": inserted,
             "closed": previous.kind == "end"}
 
 
@@ -121,6 +122,7 @@ def diagnostic_stats(events, *, preceding_sequence=0):
     bar_times = set()
     last_bar = None
     bars = []
+    ticks_by_hour = {}
     last_sequence = preceding_sequence
     for e in events:
         counts[e.kind] += 1
@@ -134,6 +136,8 @@ def diagnostic_stats(events, *, preceding_sequence=0):
             counts["negative_age"] += age < 0
             counts["outside_age_gate"] += not -100 <= age <= 2000
             counts["invalid_bid_ask"] += not (valid_price(bid) and valid_price(ask) and bid <= ask)
+            if valid_price(bid) and valid_price(ask) and bid <= ask:
+                ticks_by_hour.setdefault(e.raw_ms // HOUR * HOUR, []).append(e)
             key = e.raw_ms, tuple(map(str, e.prices))
             counts["duplicate_ticks"] += key in duplicates
             duplicates.add(key)
@@ -153,11 +157,28 @@ def diagnostic_stats(events, *, preceding_sequence=0):
             geometry = all(valid_price(p) for p in e.prices) and all(
                 low <= min(open_, close) <= max(open_, close) <= high
                 for open_, high, low, close in (bid, ask))
-            bars.append({"open_utc": datetime.fromtimestamp(e.raw_ms / 1000, timezone.utc).isoformat(),
+            bars.append({"provider_open_ms": e.raw_ms,
+                         "open_utc": datetime.fromtimestamp(e.raw_ms / 1000, timezone.utc).isoformat(),
                          "bid_ohlc": list(map(str, bid)), "ask_ohlc": list(map(str, ask)),
                          "aligned_utc_hour": e.raw_ms % HOUR == 0,
                          "valid_geometry": geometry, "duplicate": duplicate,
                          "receipt_minus_bar_end_ms": e.utc_ms - e.raw_ms - HOUR})
+    for bar in bars:
+        opening = bar["provider_open_ms"]
+        recorded = ticks_by_hour.get(opening, [])
+        eligible = [tick for tick in recorded if -100 <= tick.utc_ms - tick.raw_ms <= 2000]
+        bar["recorded_ticks"] = len(recorded)
+        bar["raw_age_eligible_ticks"] = len(eligible)
+        if recorded:
+            bar["first_tick_offset_ms"] = min(t.raw_ms for t in recorded) - opening
+            bar["last_tick_to_close_ms"] = opening + HOUR - max(t.raw_ms for t in recorded)
+        for label, sample in (("recorded", recorded), ("raw_age_eligible", eligible)):
+            sample = sorted(sample, key=lambda t: (t.raw_ms, t.sequence))
+            for side, index in (("bid", 0), ("ask", 1)):
+                values = [t.prices[index] for t in sample]
+                reconstructed = [values[0], max(values), min(values), values[-1]] if values else None
+                bar[f"{label}_{side}_matches"] = (
+                    reconstructed == list(map(Decimal, bar[f"{side}_ohlc"])) if reconstructed else None)
     duration = (previous.monotonic_ns - first.monotonic_ns) / 1e9 if first else 0
     ages.sort()
     age_summary = ({"min": ages[0], "median": median(ages), "p95": ages[ceil(.95 * len(ages)) - 1],
@@ -166,6 +187,83 @@ def diagnostic_stats(events, *, preceding_sequence=0):
             "tick_span_seconds": duration, "ticks_per_second": (len(ages) - 1) / duration if duration > 0 else None,
             "longest_intertick_seconds": longest_ns / 1e9, "receipt_minus_provider_ms": age_summary,
             "h1_callbacks": bars}
+
+
+def timing_segments(events):
+    """Split diagnostic tick timing at clock discontinuities and material gaps."""
+    result = []
+    ticks = []
+    boundary = "capture_start"
+    previous = None
+
+    def finish():
+        stats = diagnostic_stats(ticks, preceding_sequence=ticks[0].sequence - 1)
+        return {"boundary": boundary, "first_sequence": ticks[0].sequence,
+                "last_sequence": ticks[-1].sequence, "ticks": len(ticks),
+                "host_utc_first_ms": ticks[0].utc_ms, "host_utc_last_ms": ticks[-1].utc_ms,
+                "tick_span_seconds": stats["tick_span_seconds"],
+                "receipt_minus_provider_ms": stats["receipt_minus_provider_ms"],
+                "negative_age": stats["counts"].get("negative_age", 0),
+                "outside_age_gate": stats["counts"].get("outside_age_gate", 0)}
+
+    for event in events:
+        if event.kind != "tick":
+            continue
+        if previous is not None:
+            monotonic_ms = (event.monotonic_ns - previous.monotonic_ns) / 1e6
+            wall_ms = event.utc_ms - previous.utc_ms
+            reasons = []
+            if monotonic_ms > 60_000:
+                reasons.append("tick_gap_over_60s")
+            if abs(wall_ms - monotonic_ms) > 100:
+                reasons.append("wall_monotonic_discontinuity")
+            if reasons:
+                result.append(finish())
+                boundary = "+".join(reasons)
+                ticks = []
+        ticks.append(event)
+        previous = event
+    if ticks:
+        result.append(finish())
+    return result
+
+
+def capture_health(spool: Path, *, now_ms=None, expected_closure=False):
+    """Check the latest spool events without replaying or changing the capture."""
+    if now_ms is None:
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    if not spool.is_file():
+        return {"state": "missing_or_unverified", "fresh_tick": False}
+    with spool.open("rb") as stream:
+        start = max(0, stream.seek(0, 2) - 256 * 1024)
+        stream.seek(start)
+        if start:
+            stream.readline(1025)
+        events = [decode(line) for line in stream.readlines() if line.endswith(b"\n")]
+    if not events:
+        return {"state": "missing_or_unverified", "fresh_tick": False}
+    last = events[-1]
+    tick = next((e for e in reversed(events) if e.kind == "tick"), None)
+    heartbeat = next((e for e in reversed(events) if e.kind == "heartbeat"), None)
+    marker = next((e for e in reversed(events) if e.kind in {
+        "subscribed", "disconnected", "collector_fault", "strategy_stopped",
+        "instrument_unavailable", "end"}), None)
+    age = now_ms - tick.utc_ms if tick else None
+    fresh = age is not None and 0 <= age <= 60_000
+    if marker and marker.kind in {"disconnected", "collector_fault", "strategy_stopped",
+                                  "instrument_unavailable", "end"}:
+        state = marker.kind
+        fresh = False
+    elif fresh:
+        state = "ticks_arriving"
+    elif expected_closure:
+        state = "expected_closure_without_fresh_ticks"
+    elif heartbeat and 0 <= now_ms - heartbeat.utc_ms <= 60_000:
+        state = "recorder_heartbeat_without_fresh_ticks"
+    else:
+        state = "missing_or_unverified"
+    return {"state": state, "fresh_tick": fresh, "tick_age_ms": age,
+            "last_sequence": last.sequence, "last_kind": last.kind, "source": last.source}
 
 
 def preview(spool: Path, *, line_limit=100_000) -> dict:
@@ -351,9 +449,19 @@ def main():
     parser.add_argument("spool", type=Path)
     parser.add_argument("journal", type=Path, nargs="?")
     parser.add_argument("--preview", action="store_true")
+    parser.add_argument("--health", action="store_true", help="Read only the recent spool tail")
+    parser.add_argument("--expected-closure", action="store_true",
+                        help="Label a scheduled closure supplied by the operator")
     parser.add_argument("--active-prefix", action="store_true",
                         help="Checkpoint an open spool without qualifying it")
     args = parser.parse_args()
+    if args.health:
+        if args.journal or args.active_prefix or args.preview:
+            parser.error("--health is a read-only alternative to import and preview")
+        print(json.dumps(capture_health(args.spool, expected_closure=args.expected_closure), indent=2))
+        return
+    if args.expected_closure:
+        parser.error("--expected-closure requires --health")
     if args.preview:
         if args.journal or args.active_prefix:
             parser.error("--preview does not write to a journal")
@@ -365,6 +473,7 @@ def main():
     report = {"ingest": result, "assessment": assess(replay(args.journal, result["run"]))}
     if args.active_prefix:
         report["diagnostic"] = diagnostic_stats(replay(args.journal, result["run"]))
+        report["timing_segments"] = timing_segments(replay(args.journal, result["run"]))
     print(json.dumps(report, indent=2))
 
 

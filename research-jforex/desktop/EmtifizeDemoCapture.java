@@ -12,12 +12,17 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /** EUR/USD diagnostic recorder. Start locally in the JForex desktop DEMO session. */
 @RequiresFullAccess
 public final class EmtifizeDemoCapture implements IStrategy {
     private Spool spool;
+    private ScheduledExecutorService heartbeat;
+    private boolean connected;
+    private boolean subscribed;
 
     @Override public void onStart(IContext context) throws JFException {
         if (context.getEngine().getType() != IEngine.Type.DEMO)
@@ -30,8 +35,22 @@ public final class EmtifizeDemoCapture implements IStrategy {
             spool.event("strategy_started", 0);
             spool.event("connected", 0);
             spool.event("demo_account_connected", 0);
+            connected = true;
             context.setSubscribedInstruments(Collections.singleton(Instrument.EURUSD), true);
+            if (!context.getSubscribedInstruments().contains(Instrument.EURUSD)) {
+                spool.event("instrument_unavailable", 0);
+                throw new JFException("EUR/USD subscription unavailable");
+            }
             spool.event("subscribed", 0);
+            subscribed = true;
+            final Spool activeSpool = spool;
+            heartbeat = Executors.newSingleThreadScheduledExecutor(task -> {
+                Thread thread = new Thread(task, "emtifize-capture-heartbeat");
+                thread.setDaemon(true);
+                return thread;
+            });
+            heartbeat.scheduleWithFixedDelay(() -> activeSpool.event("heartbeat", 0), 15, 15,
+                                             TimeUnit.SECONDS);
             context.getConsole().getOut().println("EUR/USD diagnostic capture started.");
         } catch (Exception failure) {
             if (spool != null) {
@@ -43,14 +62,19 @@ public final class EmtifizeDemoCapture implements IStrategy {
     }
 
     @Override public void onTick(Instrument instrument, ITick tick) throws JFException {
-        if (spool == null || instrument != Instrument.EURUSD) return;
+        if (spool == null || !connected || instrument != Instrument.EURUSD) return;
         try { spool.check(); }
         catch (IOException failure) { throw new JFException("Capture write failed"); }
+        if (!subscribed) {
+            spool.event("subscribed", 0);
+            subscribed = true;
+        }
         spool.event("tick", tick.getTime(), tick.getBid(), tick.getAsk());
     }
 
     @Override public void onBar(Instrument instrument, Period period, IBar ask, IBar bid) {
-        if (spool == null || instrument != Instrument.EURUSD || !Period.ONE_HOUR.equals(period)) return;
+        if (spool == null || !connected || !subscribed || instrument != Instrument.EURUSD
+                || !Period.ONE_HOUR.equals(period)) return;
         if (ask == null || bid == null || ask.getTime() != bid.getTime()) {
             spool.event("gap", 0);
             return;
@@ -60,6 +84,7 @@ public final class EmtifizeDemoCapture implements IStrategy {
     }
 
     @Override public void onStop() throws JFException {
+        if (heartbeat != null) heartbeat.shutdownNow();
         if (spool == null) return;
         try {
             spool.event("strategy_stopped", 0);
@@ -72,7 +97,12 @@ public final class EmtifizeDemoCapture implements IStrategy {
     }
 
     @Override public void onMessage(IMessage ignored) {}
-    @Override public void onAccount(IAccount ignored) {}
+    @Override public void onAccount(IAccount account) {
+        if (spool == null || account == null || connected == account.isConnected()) return;
+        connected = account.isConnected();
+        subscribed = false;
+        spool.event(connected ? "connected" : "disconnected", 0);
+    }
 
     /** Single-writer, bounded callback spool. Output directory must be user-private. */
     private static final class Spool implements AutoCloseable {
@@ -103,7 +133,7 @@ public final class EmtifizeDemoCapture implements IStrategy {
         private String line(String kind, long raw, double[] values) {
             long host = System.currentTimeMillis();
             long monotonic = System.nanoTime() - origin;
-            StringBuilder out = new StringBuilder("1\t").append(source).append("\tcollector-1\t")
+            StringBuilder out = new StringBuilder("1\t").append(source).append("\tcollector-2\t")
                 .append(run).append('\t').append(++sequence).append('\t').append(kind).append('\t')
                 .append(raw).append('\t').append(host).append('\t').append(monotonic).append('\t')
                 .append(dropped).append("\tEURUSD");

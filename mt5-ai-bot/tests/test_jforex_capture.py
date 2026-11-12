@@ -4,7 +4,9 @@ import pytest
 
 from decimal import Decimal as D
 
-from src.research.jforex_capture import HOUR, Observation, assess, ingest, preview, replay
+from src.research.jforex_capture import (
+    HOUR, Observation, assess, capture_health, ingest, preview, replay, timing_segments,
+)
 
 BASE = 1767600000000
 
@@ -107,3 +109,23 @@ def test_active_checkpoint_is_idempotent_and_resumes_through_seal(tmp_path):
     path.write_bytes(sealed.splitlines(keepends=True)[0])
     with pytest.raises(ValueError, match="membership"):
         ingest(path, db, active_prefix=True)
+
+
+def test_heartbeat_does_not_count_as_fresh_market_data(tmp_path):
+    path = tmp_path / "capture.tsv"
+    spool(path, [("subscribed", 0, (), 0), ("heartbeat", 0, (), 0)])
+    report = capture_health(path, now_ms=BASE + 3)
+    assert report["state"] == "recorder_heartbeat_without_fresh_ticks"
+    assert not report["fresh_tick"]
+
+
+def test_timing_segments_do_not_blend_clock_steps_or_long_gaps():
+    def tick(seq, wall, mono):
+        return Observation("jforex_demo", "run", seq, "tick", BASE + mono,
+                           BASE + wall, mono * 1_000_000, 0, (D("1.1"), D("1.2")))
+
+    rows = [tick(1, 0, 0), tick(2, 1000, 1000), tick(3, 5000, 2000), tick(4, 65001, 62001)]
+    segments = timing_segments(rows)
+    assert [(s["boundary"], s["ticks"]) for s in segments] == [
+        ("capture_start", 2), ("wall_monotonic_discontinuity", 1), ("tick_gap_over_60s", 1)]
+    assert segments[1]["receipt_minus_provider_ms"]["median"] == 3000
