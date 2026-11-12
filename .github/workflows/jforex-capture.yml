@@ -20,9 +20,12 @@ jobs:
         with:
           python-version: '3.11'
       - name: Build pinned SDK project
-        run: mvn -B -ntp -f research-jforex/pom.xml compile dependency:copy-dependencies
+        run: mvn -B -ntp -f research-jforex/pom.xml compile
       - name: Compile desktop recorder
-        run: javac --release 8 -cp research-jforex/target/dependency/JForex-API-2.13.99.jar -d research-jforex/target/classes research-jforex/desktop/EmtifizeDemoCapture.java
+        shell: pwsh
+        run: |
+          $api = Join-Path $env:USERPROFILE '.m2/repository/com/dukascopy/api/JForex-API/2.13.99/JForex-API-2.13.99.jar'
+          javac --release 8 -cp $api -d research-jforex/target/classes research-jforex/desktop/EmtifizeDemoCapture.java
       - name: Replay offline Java capture in Python
         shell: pwsh
         run: |
