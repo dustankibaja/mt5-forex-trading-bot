@@ -25,7 +25,7 @@ jobs:
         shell: pwsh
         run: |
           $api = Join-Path $env:USERPROFILE '.m2/repository/com/dukascopy/api/JForex-API/2.13.99/JForex-API-2.13.99.jar'
-          javac --release 8 -cp $api -d research-jforex/target/classes research-jforex/desktop/EmtifizeDemoCapture.java
+          javac --release 8 -cp $api -d research-jforex/target/classes research-jforex/desktop/EmtifizeDemoCapture.java research-jforex/desktop/EmtifizeWarmupExport.java
       - name: Replay offline Java capture in Python
         shell: pwsh
         run: |
