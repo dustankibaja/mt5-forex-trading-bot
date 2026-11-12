@@ -1,0 +1,44 @@
+name: JForex research capture
+on:
+  pull_request:
+    paths:
+      - 'research-jforex/**'
+      - 'mt5-ai-bot/src/research/jforex_capture.py'
+      - '.github/workflows/jforex-capture.yml'
+permissions:
+  contents: read
+jobs:
+  java-python-fixture:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build pinned SDK project
+        run: mvn -B -ntp -f research-jforex/pom.xml compile
+      - name: Compile desktop recorder
+        shell: pwsh
+        run: |
+          $api = Join-Path $env:USERPROFILE '.m2/repository/com/dukascopy/api/JForex-API/2.13.99/JForex-API-2.13.99.jar'
+          javac --release 8 -cp $api -d research-jforex/target/classes research-jforex/desktop/EmtifizeDemoCapture.java
+      - name: Replay offline Java capture in Python
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP 'fixture.tsv'
+          $db = Join-Path $env:RUNNER_TEMP 'fixture.sqlite'
+          java -cp research-jforex/target/classes ai.emtifize.Fixture $fixture
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Set-Location mt5-ai-bot
+          $result = python -B -m src.research.jforex_capture $fixture $db | ConvertFrom-Json
+          if ($LASTEXITCODE -or $result.assessment.trust -ne 'synthetic' -or
+              $result.assessment.observed_thresholds_met -or
+              $result.assessment.counters.duplicate_tick -ne 1 -or
+              $result.assessment.counters.stale -ne 1 -or
+              $result.assessment.counters.observed_reconnects -ne 1) { exit 1 }
+          $again = python -B -m src.research.jforex_capture $fixture $db | ConvertFrom-Json
+          if ($LASTEXITCODE -or $again.ingest.inserted -ne 0) { exit 1 }
