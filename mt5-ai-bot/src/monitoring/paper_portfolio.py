@@ -307,25 +307,23 @@ def append_fixture_events(path, rules: PaperRules, events=()):
         if saved and saved[0] != frozen:
             raise ValueError("Paper strategy or execution freeze changed")
         book = _Portfolio(rules)
-        known = {}
         for event_id, payload in db.execute("SELECT id, payload FROM paper_events ORDER BY rowid"):
             event = _decode(payload)
             if event.event_id != event_id:
                 raise ValueError("Paper event ID does not match its payload")
-            known[event_id] = payload
             book.apply(event)
         if saved and _encode(book.snapshot()) != saved[1]:
             raise ValueError("Paper projection does not reconcile with events")
         for event in events:
             payload = _payload(event)
-            prior = known.get(event.event_id)
+            prior = db.execute("SELECT payload FROM paper_events WHERE id=?",
+                               (event.event_id,)).fetchone()
             if prior is not None:
-                if prior != payload:
+                if prior[0] != payload:
                     raise ValueError("Conflicting paper event ID")
                 continue
             book.apply(event)
             db.execute("INSERT INTO paper_events VALUES (?, ?)", (event.event_id, payload))
-            known[event.event_id] = payload
         projection = _encode(book.snapshot())
         db.execute("""INSERT INTO paper_state VALUES (1, ?, ?)
                       ON CONFLICT(singleton) DO UPDATE SET projection=excluded.projection""",
