@@ -42,3 +42,21 @@ Before capture, record an independent host UTC reference and uncertainty at most
 Frozen thresholds: reject ages below −100 ms or above 2,000 ms, invalid/crossed quotes and backward provider timestamps; separately count negative ages, exact same-time/price repeats, order anomalies, stale values, bad candles and explicit loss. Preserve same-time price changes. Require target-hour nonnegative delivery p99 ≤1,000 ms, using distinct valid ordered observations including stale values capped at 2,001 ms for the threshold computation. Missing sequence numbers, queue loss, provider timestamp-unit failures, UTC/monotonic inconsistency or ambiguous candles block automated passage. An independent clock and controlled-reconnect review remain mandatory. Do not adjust these rules after seeing authenticated data. There is no paper freeze until that review passes.
 
 Offline reproduction: substitute `ai.emtifize.Fixture` and omit the duration, using a fresh file. The resulting spool must stay synthetic and contains a deliberate duplicate, stale/out-of-order tick and reconnect. Run Python tests for malformed/partial spools, idempotency, conflicting IDs, and quote classification.
+
+## Sprint 14 Desktop recovery
+
+Seal and ingest the old spool before switching the local Desktop strategy. Use a unique spool per start, and pass `--active-prefix` for repeatable snapshots of the active writer. In JForex Desktop, run the recorder locally in the authenticated DEMO session. Clear the **Retrieve historical warm-up once** checkbox for continuous recording. The recorder binds the account in memory and can recognize recovery from the first EUR/USD tick when the positive account callback is delayed or absent. Keep the sequence from disconnect through the first returning eligible tick when measuring recovery.
+
+Run the separate `EmtifizeWarmupExport` helper locally to isolate IHistory requests from continuous capture. It starts on the first EUR/USD callback, requests BID and ASK histories for completed H1 bars and validates pairing before export. Any resulting CSV belongs in the private JForex directory with warm-up provenance. A history failure leaves warm-up pending.
+
+Record the active Windows Time configuration before trialing a peer. The supported commands used in the Windows NTP client trial and rollback were:
+
+```powershell
+w32tm /config /manualpeerlist:time.cloudflare.com,0x8 /syncfromflags:manual /update
+w32tm /resync /rediscover
+# Restore the original standalone workstation configuration.
+w32tm /config /manualpeerlist:time.windows.com,0x9 /syncfromflags:manual /update
+w32tm /resync /rediscover
+```
+
+Collect independent reference samples and bound uncertainty after a successful resync. Keep Windows sleep gaps and clock steps out of qualifying coverage. Leave the acceptance start unset until the frozen prerequisites pass.

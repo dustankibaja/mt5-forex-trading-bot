@@ -23,14 +23,32 @@ public final class EmtifizeDemoCapture implements IStrategy {
     private ScheduledExecutorService heartbeat;
     private boolean connected;
     private boolean subscribed;
+    private boolean accountConnected;
+    private IContext desktopContext;
+    private String accountIdentity;
+    private IHistory history;
+    private IConsole contextConsole;
+    private Path warmupFile;
+    private boolean warmupPending = true;
+    @Configurable("Retrieve historical warm-up once")
+    public boolean retrieveWarmup = true;
 
     @Override public void onStart(IContext context) throws JFException {
         if (context.getEngine().getType() != IEngine.Type.DEMO)
             throw new JFException("EUR/USD diagnostic capture requires a DEMO account");
+        IAccount account = context.getAccount();
+        if (account == null || account.getAccountId() == null || account.getAccountId().isEmpty())
+            throw new JFException("Cannot bind the DEMO account");
+        desktopContext = context;
+        accountIdentity = account.getAccountId();
+        accountConnected = account.isConnected();
         try {
             Path directory = Paths.get(System.getenv("LOCALAPPDATA"), "EmtifizeResearch", "JForex");
             if (!Files.isDirectory(directory)) throw new IOException("Private capture folder missing");
             Path file = directory.resolve("diagnostic-desktop-" + UUID.randomUUID() + ".tsv");
+            history = context.getHistory();
+            contextConsole = context.getConsole();
+            warmupFile = file.resolveSibling(file.getFileName() + ".warmup.csv");
             spool = new Spool(file, false, 8192);
             spool.event("strategy_started", 0);
             spool.event("connected", 0);
@@ -62,14 +80,65 @@ public final class EmtifizeDemoCapture implements IStrategy {
     }
 
     @Override public void onTick(Instrument instrument, ITick tick) throws JFException {
-        if (spool == null || !connected || instrument != Instrument.EURUSD) return;
+        if (spool == null || instrument != Instrument.EURUSD) return;
         try { spool.check(); }
         catch (IOException failure) { throw new JFException("Capture write failed"); }
+        if (!sameDemoAccount(desktopContext.getAccount())) return;
+        if (!connected) {
+            // Desktop can resume ticks before emitting a positive account callback.
+            // The live tick and unchanged local DEMO binding prove feed recovery.
+            connected = true;
+            spool.event("connected", 0);
+        }
         if (!subscribed) {
             spool.event("subscribed", 0);
             subscribed = true;
         }
         spool.event("tick", tick.getTime(), tick.getBid(), tick.getAsk());
+        if (retrieveWarmup && warmupPending) {
+            warmupPending = false;
+            writeWarmup(tick.getTime());
+        }
+    }
+
+    private void writeWarmup(long providerTime) {
+        try {
+            long cutoff = history.getPreviousBarStart(Period.ONE_HOUR, providerTime);
+            java.util.List<IBar> bids = history.getBars(Instrument.EURUSD, Period.ONE_HOUR, OfferSide.BID,
+                                                        Filter.WEEKENDS, 220, cutoff, 0);
+            java.util.List<IBar> asks = history.getBars(Instrument.EURUSD, Period.ONE_HOUR, OfferSide.ASK,
+                                                        Filter.WEEKENDS, 220, cutoff, 0);
+            if (bids.size() != asks.size() || bids.size() < 211)
+                throw new IOException("Incomplete warm-up pairs");
+            StringBuilder csv = new StringBuilder("provenance,raw_open_ms,bid_o,bid_h,bid_l,bid_c,ask_o,ask_h,ask_l,ask_c\n");
+            long previous = 0;
+            for (int i = 0; i < bids.size(); i++) {
+                IBar bid = bids.get(i), ask = asks.get(i);
+                long opening = bid.getTime();
+                if (opening != ask.getTime() || opening <= previous || opening % 3_600_000L != 0
+                        || opening + 3_600_000L > providerTime)
+                    throw new IOException("Invalid paired warm-up timestamps");
+                previous = opening;
+                csv.append("jforex_live_origin_warmup,").append(opening);
+                appendPrices(csv, bid);
+                appendPrices(csv, ask);
+                csv.append('\n');
+            }
+            Files.write(warmupFile, csv.toString().getBytes(StandardCharsets.US_ASCII),
+                        StandardOpenOption.CREATE_NEW);
+            spool.event("warmup_written", 0);
+        } catch (Exception failure) {
+            spool.event("warmup_unavailable", 0);
+            if (contextConsole != null)
+                contextConsole.getErr().println("Historical warm-up unavailable: " + failure.getClass().getSimpleName());
+        }
+    }
+
+    private static void appendPrices(StringBuilder csv, IBar bar) {
+        for (double value : new double[]{bar.getOpen(), bar.getHigh(), bar.getLow(), bar.getClose()}) {
+            if (!Double.isFinite(value) || value <= 0) throw new IllegalArgumentException("Invalid warm-up price");
+            csv.append(',').append(value);
+        }
     }
 
     @Override public void onBar(Instrument instrument, Period period, IBar ask, IBar bid) {
@@ -98,10 +167,19 @@ public final class EmtifizeDemoCapture implements IStrategy {
 
     @Override public void onMessage(IMessage ignored) {}
     @Override public void onAccount(IAccount account) {
-        if (spool == null || account == null || connected == account.isConnected()) return;
-        connected = account.isConnected();
-        subscribed = false;
-        spool.event(connected ? "connected" : "disconnected", 0);
+        if (spool == null || !sameDemoAccount(account)) return;
+        boolean reportedConnected = account.isConnected();
+        if (accountConnected && !reportedConnected) {
+            connected = false;
+            subscribed = false;
+            spool.event("disconnected", 0);
+        }
+        accountConnected = reportedConnected;
+    }
+
+    private boolean sameDemoAccount(IAccount account) {
+        return account != null && desktopContext.getEngine().getType() == IEngine.Type.DEMO
+                && accountIdentity.equals(account.getAccountId());
     }
 
     /** Single-writer, bounded callback spool. Output directory must be user-private. */
