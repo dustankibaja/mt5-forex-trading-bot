@@ -49,6 +49,12 @@ Seal and ingest the old spool before switching the local Desktop strategy. Use a
 
 Run the separate `EmtifizeWarmupExport` helper locally to isolate IHistory requests from continuous capture. It starts on the first EUR/USD callback, requests BID and ASK histories for completed H1 bars and validates pairing before export. Any resulting CSV belongs in the private JForex directory with warm-up provenance. A history failure leaves warm-up pending.
 
+## Sprint 15 warm-up recovery and clock decision
+
+`EmtifizeWarmupExport` now diagnoses the history operation and requested UTC interval without recording credentials or account identifiers. It first proves one and five completed pairs, an exact recent interval, 24 pairs, and then 220 pairs. If the Desktop cache times out on the synchronous `getBar` entry point, it falls back to the SDK's asynchronous `readBars` path in progressive 1, 5, 24, and 336-hour stages. BID and ASK remain separate until timestamp, order, completion, geometry, and closing-spread checks pass. Both paths use `Filter.WEEKENDS`, so scheduled weekend bars are excluded, and write a new private CSV rather than modifying an earlier export.
+
+The frozen acceptance-v1 clock limit remains 100 ms. `src.research.calibrated_clock` is a reviewable candidate protocol only: it intersects uncertainty intervals from at least two independently administered reference families, propagates oscillator drift from a monotonic anchor, expires calibration, and rejects sleep or host-clock steps. It is not connected to capture, assessment, signals, paper trading, or execution. Do not label any observation clock-certified until the existing v1 gate passes or a separately reviewed protocol is explicitly adopted before a new prospective cohort begins.
+
 Record the active Windows Time configuration before trialing a peer. The supported commands used in the Windows NTP client trial and rollback were:
 
 ```powershell

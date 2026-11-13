@@ -4,6 +4,8 @@ on:
     paths:
       - 'research-jforex/**'
       - 'mt5-ai-bot/src/research/jforex_capture.py'
+      - 'mt5-ai-bot/src/research/calibrated_clock.py'
+      - 'mt5-ai-bot/tests/test_calibrated_clock.py'
       - '.github/workflows/jforex-capture.yml'
 permissions:
   contents: read
@@ -42,3 +44,6 @@ jobs:
               $result.assessment.counters.observed_reconnects -ne 1) { exit 1 }
           $again = python -B -m src.research.jforex_capture $fixture $db | ConvertFrom-Json
           if ($LASTEXITCODE -or $again.ingest.inserted -ne 0) { exit 1 }
+      - name: Test inactive calibrated-clock candidate
+        working-directory: mt5-ai-bot
+        run: python -m pytest -q tests/test_calibrated_clock.py
