@@ -11,6 +11,7 @@ class TradeJournal:
     path: Path
 
     def __post_init__(self) -> None:
+        self.path = Path(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             with self.path.open("w", newline="") as file:

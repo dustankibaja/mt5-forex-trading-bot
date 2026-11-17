@@ -1,0 +1,38 @@
+[
+  {
+    "year": 2022,
+    "url": "https://evtradelabs.com/api/simulator/data/EURUSD/H1/2022.json.gz",
+    "sha256": "2105a72389c35861a54519211ae4d6a22bb8672aeebf42c9ec5185ffcc47cbbe",
+    "bars": 6240,
+    "first": "2022-01-02T22:00:00+00:00",
+    "last": "2022-12-30T21:00:00+00:00",
+    "attribution": "EV Trading Labs \u2014 derived from Dukascopy ticks"
+  },
+  {
+    "year": 2023,
+    "url": "https://evtradelabs.com/api/simulator/data/EURUSD/H1/2023.json.gz",
+    "sha256": "7ab70224a4ab87fed2a8bee3056681e13475bd5a6eb426791dde3c7ea8faabab",
+    "bars": 6225,
+    "first": "2023-01-01T22:00:00+00:00",
+    "last": "2023-12-29T21:00:00+00:00",
+    "attribution": "EV Trading Labs \u2014 derived from Dukascopy ticks"
+  },
+  {
+    "year": 2024,
+    "url": "https://evtradelabs.com/api/simulator/data/EURUSD/H1/2024.json.gz",
+    "sha256": "66fa719d8e7d75c11e1c691b232471fe3c9323e91ed998e8b82fe943f85d38b2",
+    "bars": 6247,
+    "first": "2024-01-01T22:00:00+00:00",
+    "last": "2024-12-31T21:00:00+00:00",
+    "attribution": "EV Trading Labs \u2014 derived from Dukascopy ticks"
+  },
+  {
+    "year": 2025,
+    "url": "https://evtradelabs.com/api/simulator/data/EURUSD/H1/2025.json.gz",
+    "sha256": "75424fa8293615a3e98d7463c90c8e1ef446bff0f29388c894298249791c995c",
+    "bars": 6223,
+    "first": "2025-01-01T22:00:00+00:00",
+    "last": "2025-12-31T21:00:00+00:00",
+    "attribution": "EV Trading Labs \u2014 derived from Dukascopy ticks"
+  }
+]

@@ -18,17 +18,31 @@ class OrderRequest:
 
 
 def allowed_fillings(symbol_info) -> List[int]:
-    modes = []
-    bitmask = getattr(symbol_info, "filling_modes", 0)
-    for mode in [mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_RETURN]:
-        if bitmask == 0:
-            modes.append(symbol_info.filling_mode)
-            break
-        if bitmask & mode:
-            modes.append(mode)
-    if not modes:
-        modes.append(symbol_info.filling_mode)
-    return list(dict.fromkeys(modes))
+    """Convert SYMBOL_FILLING_MODE flags into valid ORDER_FILLING_* policies.
+
+    SYMBOL_FILLING_FOK/IOC use 1/2 as flags; ORDER_FILLING_FOK/IOC
+    use 0/1 as enum values. They are not interchangeable.
+    """
+    flags = symbol_info.filling_mode
+    execution = symbol_info.trade_exemode
+    if execution in (
+        mt5.SYMBOL_TRADE_EXECUTION_INSTANT,
+        mt5.SYMBOL_TRADE_EXECUTION_REQUEST,
+    ):
+        return [
+            mt5.ORDER_FILLING_FOK,
+            mt5.ORDER_FILLING_IOC,
+            mt5.ORDER_FILLING_RETURN,
+        ]
+
+    modes: List[int] = []
+    if flags & 1:  # SYMBOL_FILLING_FOK flag
+        modes.append(mt5.ORDER_FILLING_FOK)
+    if flags & 2:  # SYMBOL_FILLING_IOC flag
+        modes.append(mt5.ORDER_FILLING_IOC)
+    if execution != mt5.SYMBOL_TRADE_EXECUTION_MARKET:
+        modes.append(mt5.ORDER_FILLING_RETURN)
+    return modes
 
 
 def build_market_order_request(
@@ -44,6 +58,8 @@ def build_market_order_request(
     comment: str = "ATRBreakout",
 ) -> OrderRequest:
     fillings = allowed_fillings(symbol_info)
+    if not fillings:
+        raise ValueError(f"No supported market-order filling policy for {symbol}")
     filling_mode = fillings[0]
 
     request = {

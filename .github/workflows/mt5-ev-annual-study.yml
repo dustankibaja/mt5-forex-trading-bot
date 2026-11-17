@@ -1,0 +1,54 @@
+name: Research - public EURUSD bid ask annual replication
+on:
+  pull_request:
+    paths:
+      - "mt5-ai-bot/src/research/ev_annual_bidask.py"
+      - "mt5-ai-bot/src/research/bidask_backtest.py"
+      - "mt5-ai-bot/scripts/run_ev_bidask_study.py"
+      - "mt5-ai-bot/tests/test_ev_bidask.py"
+      - ".github/workflows/mt5-ev-annual-study.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  annual-bidask:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: mt5-ai-bot
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Pinned non-broker research dependencies
+        run: pip install "numpy==1.26.4" "pandas==2.2.2" "pytest==8.2.2"
+      - name: Compile research scripts
+        run: python -m compileall -q src/research scripts/run_ev_bidask_study.py
+      - name: Unit test annual file parsers (no market data fetch)
+        run: python -m pytest tests/test_ev_bidask.py -q
+      - name: Independently distributed 2022-2025 H1 BID/ASK simulation
+        run: python scripts/run_ev_bidask_study.py --out ev_research_report
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f ev_research_report/report.md ]; then
+            cat ev_research_report/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve data manifest and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-public-bidask-2022-2025
+          path: mt5-ai-bot/ev_research_report
+          if-no-files-found: ignore
+      - name: Publish report as PR comment
+        if: success() && github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -X POST -f body="$(cat ev_research_report/report.md)"

@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT_DIR))
 
 
 import argparse
+import os
 import time
 from datetime import datetime, timezone
 
@@ -25,12 +26,71 @@ from src.execution.risk_manager import RiskLimits, RiskManager
 from src.execution.safeguards import kill_switch_active, is_symbol_tradable, spread_too_high, stops_level_ok
 from src.monitoring.alerts import load_telegram_alert
 from src.monitoring.journal import TradeJournal
+from src.monitoring.status_snapshot import DEFAULT_STATUS_PATH, publish_status
+from src.monitoring.demo_account_snapshot import DEFAULT_DEMO_PATH, capture_demo_snapshot, invalidate_demo_snapshot
+from src.monitoring.demo_controls import DEFAULT_PAUSE_PATH, demo_paused
 from src.strategy.atr_breakout import compute_signal
 from src.utils.logging import configure_logging, get_logger
 from src.utils.timeutils import is_in_session, parse_sessions
 
 
 logger = get_logger(__name__)
+
+# Must match the magic used in order_builder.build_market_order_request.
+BOT_MAGIC = 123456
+
+
+def refresh_account_risk(now: datetime, risk_manager: RiskManager) -> bool:
+    """Rebuild daily controls from broker state, including after bot restarts.
+
+    Loss tracking is deliberately account-wide: unrelated manual trades can also
+    trigger a stop. Deposits/withdrawals are excluded. Fail closed on API errors.
+    """
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    deals = mt5.history_deals_get(day_start, now)
+    positions = mt5.positions_get()
+    if deals is None or positions is None:
+        logger.error("Cannot verify broker deal history or positions; trading disabled")
+        return False
+
+    market_types = {mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL}
+    trade_deals = [deal for deal in deals if deal.type in market_types]
+    opening_entries = {mt5.DEAL_ENTRY_IN, mt5.DEAL_ENTRY_INOUT}
+    opened_positions = {
+        deal.position_id
+        for deal in trade_deals
+        if deal.magic == BOT_MAGIC and deal.entry in opening_entries
+    }
+    realized = sum(
+        float(getattr(deal, "profit", 0) or 0)
+        + float(getattr(deal, "commission", 0) or 0)
+        + float(getattr(deal, "swap", 0) or 0)
+        + float(getattr(deal, "fee", 0) or 0)
+        for deal in trade_deals
+    )
+    floating = sum(
+        float(getattr(position, "profit", 0) or 0)
+        + float(getattr(position, "swap", 0) or 0)
+        for position in positions
+    )
+    risk_manager.state.trades_today = max(
+        risk_manager.state.trades_today, len(opened_positions)
+    )
+    risk_manager.state.realized_pnl_today = realized + floating
+    return True
+
+
+def demo_account_connected() -> bool:
+    """Recheck identity: never run a demo-only worker against funded MT5."""
+    terminal = mt5.terminal_info()
+    account = mt5.account_info()
+    return bool(
+        terminal is not None
+        and getattr(terminal, "connected", False)
+        and account is not None
+        and getattr(account, "trade_mode", None) == mt5.ACCOUNT_TRADE_MODE_DEMO
+    )
+
 
 TIMEFRAME_MAP = {
     "M1": mt5.TIMEFRAME_M1,
@@ -44,7 +104,8 @@ TIMEFRAME_MAP = {
 
 
 def fetch_rates(symbol: str, timeframe: int, bars: int) -> pd.DataFrame:
-    rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, bars)
+    # Position zero is the still-forming candle; only use closed candles.
+    rates = mt5.copy_rates_from_pos(symbol, timeframe, 1, bars)
     if rates is None:
         return pd.DataFrame()
     df = pd.DataFrame(rates)
@@ -58,19 +119,50 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--require-demo", action="store_true", help="Refuse non-demo MT5 accounts")
     args = parser.parse_args()
 
     configure_logging()
     load_dotenv()
     config = load_config(args.config)
+    # HARD RELEASE GATE: the legacy unattended worker may never place orders,
+    # even if someone changes config.yaml or omits --dry-run by mistake.
+    # A future profitable strategy needs a separately audited executable.
+    if not (args.dry_run and args.require_demo and config.execution.dry_run):
+        raise SystemExit(
+            "HARD_LOCK: unattended strategy worker is DEMO dry-run ONLY. "
+            "Use --dry-run --require-demo with execution.dry_run=true."
+        )
+    status_path = os.environ.get("BOT_STATUS_PATH", str(DEFAULT_STATUS_PATH))
+    demo_path = os.environ.get("BOT_DEMO_ACCOUNT_PATH", str(DEFAULT_DEMO_PATH))
+    remote_pause_path = os.environ.get("BOT_REMOTE_PAUSE_PATH", str(DEFAULT_PAUSE_PATH))
+    demo_only_readback = bool(args.require_demo and (args.dry_run or config.execution.dry_run))
+    # Never allow an old demo snapshot to remain visible after a restart.
+    invalidate_demo_snapshot(demo_path)
+
+    def heartbeat(state: str) -> None:
+        publish_status(
+            status_path, state=state,
+            dry_run=bool(args.dry_run or config.execution.dry_run),
+            symbols=config.symbols,
+            demo_guarded=demo_only_readback,
+        )
 
     adapter = MT5Adapter(
         retry_attempts=config.execution.retry_attempts,
         retry_backoff_seconds=config.execution.retry_backoff_seconds,
     )
     if not adapter.initialize():
+        heartbeat("offline")
         return
 
+    if args.require_demo and not demo_account_connected():
+        heartbeat("offline")
+        logger.error("DEMO account required; engine will not run")
+        adapter.shutdown()
+        return
+
+    heartbeat("running")
     alert = load_telegram_alert()
     journal = TradeJournal(path="trades/trade_journal.csv")
     risk_manager = RiskManager(
@@ -89,11 +181,22 @@ def main() -> None:
 
     try:
         while True:
+            if args.require_demo and not demo_account_connected():
+                invalidate_demo_snapshot(demo_path)
+                heartbeat("offline")
+                logger.error("DEMO account disconnected or changed; engine stopped")
+                break
+            manual_pause = kill_switch_active(config.execution.kill_switch_file)
+            remote_pause = demo_paused(remote_pause_path)
+            heartbeat("paused" if manual_pause or remote_pause else "running")
             now = datetime.now(timezone.utc)
+            if demo_only_readback:
+                if not capture_demo_snapshot(mt5, demo_path, now=now):
+                    logger.warning("DEMO account snapshot unavailable; app values hidden")
             risk_manager.reset_if_new_day(now)
 
-            if kill_switch_active(config.execution.kill_switch_file):
-                logger.warning("Kill switch active. No new trades.")
+            if manual_pause or remote_pause:
+                logger.info("Demo signals paused. No new trades or dry-run signals.")
                 time.sleep(5)
                 continue
 
@@ -135,7 +238,20 @@ def main() -> None:
                 if signal.direction == 0:
                     continue
 
-                can_trade, reason = risk_manager.can_trade(balance=mt5.account_info().balance)
+                account = mt5.account_info()
+                if account is None or not refresh_account_risk(now, risk_manager):
+                    logger.error("Account state unavailable; trading disabled")
+                    continue
+
+                positions = mt5.positions_get(symbol=symbol)
+                if positions is None:
+                    logger.error("Cannot verify existing positions; trading disabled", {"symbol": symbol})
+                    continue
+                if len(positions) >= config.risk.max_concurrent_positions_per_symbol:
+                    logger.info("Maximum symbol positions reached", {"symbol": symbol})
+                    continue
+
+                can_trade, reason = risk_manager.can_trade(balance=account.balance)
                 if not can_trade:
                     logger.warning("Risk limits block trade", {"reason": reason})
                     continue
@@ -154,18 +270,26 @@ def main() -> None:
                     continue
 
                 volume = risk_manager.position_size_lots(
-                    balance=mt5.account_info().balance,
+                    balance=account.balance,
                     sl_distance=sl_distance,
                     point=info.point,
                     tick_value=info.trade_tick_value,
                     volume_step=info.volume_step,
                     volume_min=info.volume_min,
                     volume_max=info.volume_max,
+                    tick_size=info.trade_tick_size,
                 )
                 if volume <= 0:
                     continue
 
                 action = mt5.ORDER_TYPE_BUY if signal.direction == 1 else mt5.ORDER_TYPE_SELL
+                # Check actual broker-currency loss at the stop, not just tick-value math.
+                stop_pnl = mt5.order_calc_profit(action, symbol, volume, entry, sl)
+                risk_budget = account.balance * config.risk.risk_per_trade_pct / 100
+                if stop_pnl is None or stop_pnl >= 0 or abs(stop_pnl) > risk_budget * (1 + 1e-8):
+                    logger.error("Broker stop-loss risk exceeds budget; skipped", {"symbol": symbol})
+                    continue
+
                 order_req = build_market_order_request(
                     symbol=symbol,
                     action=action,
@@ -188,26 +312,13 @@ def main() -> None:
                 if result is None:
                     continue
 
+                # Never open without server-side SL/TP. No unsafe fallback on invalid stops.
                 if result.retcode == mt5.TRADE_RETCODE_INVALID_STOPS:
-                    logger.warning("Invalid stops, retry without SL/TP", {"symbol": symbol})
-                    order_req = build_market_order_request(
-                        symbol=symbol,
-                        action=action,
-                        volume=volume,
-                        price=entry,
-                        deviation=config.execution.deviation,
-                        sl=None,
-                        tp=None,
-                        symbol_info=info,
-                    )
-                    response = manager.send_order_with_fillings(order_req, info)
-                    result = response.result
-                    if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-                        continue
-                    modify_req = build_sl_tp_request(result.order, symbol, sl, tp)
-                    adapter.modify_position_sl_tp(modify_req)
+                    logger.error("Broker rejected protective stops; order not retried", {"symbol": symbol})
+                    continue
 
                 if result.retcode == mt5.TRADE_RETCODE_DONE:
+                    risk_manager.record_trade(0.0)
                     journal.append(
                         {
                             "time": datetime.now(timezone.utc).isoformat(),
@@ -225,7 +336,11 @@ def main() -> None:
 
             time.sleep(10)
     finally:
-        adapter.shutdown()
+        try:
+            invalidate_demo_snapshot(demo_path)
+            heartbeat("offline")
+        finally:
+            adapter.shutdown()
 
 
 if __name__ == "__main__":
