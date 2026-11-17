@@ -62,3 +62,14 @@ def test_complexity_limit_rejects_abuse():
     leaf = raw["long_entry"]["conditions"][0]
     raw["long_entry"] = {"type":"group","operator":"AND","conditions":[deepcopy(leaf) for _ in range(129)]}
     with pytest.raises(StrategyValidationError, match="complexity"): validate_strategy(raw)
+
+def test_mixed_ema_sma_is_preserved_exactly():
+    p = LocalRuleInterpreter().interpret("Buy when 20 EMA crosses above 50 SMA on H1. Sell when 20 SMA crosses below 50 EMA. Use a 20 pip stop, 40 pip take profit, and risk 0.25%.")
+    assert p["parsed_facts"]["long"]["right"]["indicator"] == "SMA"
+    assert p["parsed_facts"]["short"]["left"]["indicator"] == "SMA"
+    assert p["parsed_facts"]["short"]["right"]["indicator"] == "EMA"
+
+def test_partial_match_with_extra_condition_is_not_accepted():
+    p = LocalRuleInterpreter().interpret("Buy when 20 EMA crosses above 50 EMA and MACD crosses above its signal on H1. Sell when 20 EMA crosses below 50 EMA. Use a 20 pip stop, 40 pip take profit, and risk 0.25%.")
+    assert p["state"] == "clarification_pending"
+    assert "macd" in p["unsupported_instructions"]

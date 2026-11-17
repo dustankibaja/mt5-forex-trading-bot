@@ -24,8 +24,9 @@ class LocalRuleInterpreter:
         if not isinstance(text, str) or not text.strip(): raise ValueError("Describe the strategy in a few sentences.")
         if len(text) > MAX_DESCRIPTION: raise ValueError("Description is too long; use 4,000 characters or fewer.")
         lower = text.lower()
-        unsupported = [term for term in ("smart money", "order block", "support", "resistance", "martingale", "python", "news") if term in lower]
+        unsupported = [term for term in ("smart money", "order block", "support", "resistance", "martingale", "python", "news", "macd", "atr") if term in lower]
         facts = deepcopy((previous or {}).get("parsed_facts", {}))
+        previous_facts = deepcopy(facts)
         timeframe = re.search(r"\b(m15|h1|h4|d1)\b", lower)
         if timeframe: facts["timeframe"] = timeframe.group(1).upper()
         sl = re.search(r"(\d+(?:\.\d+)?)\s*[- ]?pip\s+stop", lower)
@@ -34,12 +35,12 @@ class LocalRuleInterpreter:
         if sl: facts["stop_loss_pips"] = float(sl.group(1))
         if tp: facts["take_profit_pips"] = float(tp.group(1))
         if risk: facts["risk_percent"] = float(risk.group(1))
-        ema = re.search(r"(?:the\s+)?(\d+)\s*(ema|sma)\s+cross(?:es)?\s+above\s+(?:the\s+)?(\d+)\s*(?:ema|sma)", lower)
-        below = re.search(r"(?:the\s+)?(\d+)\s*(ema|sma)\s+cross(?:es)?\s+below\s+(?:the\s+)?(\d+)\s*(?:ema|sma)", lower)
+        ema = re.search(r"(?:the\s+)?(\d+)\s*(ema|sma)\s+cross(?:es)?\s+above\s+(?:the\s+)?(\d+)\s*(ema|sma)", lower)
+        below = re.search(r"(?:the\s+)?(\d+)\s*(ema|sma)\s+cross(?:es)?\s+below\s+(?:the\s+)?(\d+)\s*(ema|sma)", lower)
         rsi = re.search(r"rsi\s*(\d+)\s+cross(?:es)?\s+above\s+(\d+(?:\.\d+)?)", lower)
         trend = re.search(r"price\s+is\s+above\s+(?:(?:the\s+)?(\d+)\s*(ema|sma)|(ema|sma)\s*(\d+))", lower)
-        if ema: facts["long"] = _comparison(_indicator(ema.group(2).upper(), int(ema.group(1))), "crosses_above", _indicator(ema.group(2).upper(), int(ema.group(3))))
-        if below: facts["short"] = _comparison(_indicator(below.group(2).upper(), int(below.group(1))), "crosses_below", _indicator(below.group(2).upper(), int(below.group(3))))
+        if ema: facts["long"] = _comparison(_indicator(ema.group(2).upper(), int(ema.group(1))), "crosses_above", _indicator(ema.group(4).upper(), int(ema.group(3))))
+        if below: facts["short"] = _comparison(_indicator(below.group(2).upper(), int(below.group(1))), "crosses_below", _indicator(below.group(4).upper(), int(below.group(3))))
         if rsi:
             rule = _comparison(_indicator("RSI", int(rsi.group(1))), "crosses_above", {"type": "constant", "value": float(rsi.group(2))})
             if trend:
@@ -52,6 +53,12 @@ class LocalRuleInterpreter:
         for key, question in (("timeframe", "Which timeframe should I use: M15, H1, H4 or D1?"), ("long", "What exact BUY condition should generate a signal?"), ("short", "What exact SELL condition should generate a signal?"), ("stop_loss_pips", "How many pips should the stop loss be?"), ("take_profit_pips", "How many pips should the take profit be?"), ("risk_percent", "What percentage should be risked per trade?")):
             if key not in facts: missing.append(key); questions.append(question)
         ambiguities = []
+        for key in ("timeframe", "stop_loss_pips", "take_profit_pips", "risk_percent"):
+            if key in previous_facts and key in facts and previous_facts[key] != facts[key]:
+                ambiguities.append(f"The new {key.replace('_', ' ')} contradicts the previously supplied value.")
+        recognized_crosses = int(ema is not None) + int(below is not None) + int(rsi is not None)
+        if len(re.findall(r"\bcross(?:es)?\b", lower)) > recognized_crosses:
+            unsupported.append("an additional crossover condition was not understood")
         if re.search(r"rsi\s*(?:goes|is)\s+above", lower): ambiguities.append("RSI level wording is ambiguous: choose crosses above or remains above.")
         if "buy" in lower and "sell" in lower and facts.get("long") == facts.get("short"): ambiguities.append("BUY and SELL rules conflict.")
         return {"provider": self.name, "external_transmission": False, "state": "draft_complete" if not missing and not unsupported and not ambiguities else "clarification_pending", "parsed_facts": facts, "suggested_defaults": {"session": "00:00-23:59 UTC", "max_positions": 1, "maximum_holding_candles": 24, "opposite_signal": True}, "missing_required_fields": missing, "unresolved_questions": questions, "ambiguous_instructions": ambiguities, "unsupported_instructions": unsupported, "limitation": "Local fallback understands explicit EMA/SMA crossovers and RSI cross-above with an optional EMA/SMA price filter. It does not understand arbitrary trading prose."}
