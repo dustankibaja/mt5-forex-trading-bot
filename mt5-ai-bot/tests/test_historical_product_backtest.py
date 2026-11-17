@@ -15,7 +15,7 @@ def rows():
     return out
 
 def test_replay_is_deterministic_except_run_identity():
-    ds={"identifier":"independent-reference-fixture","content_hash":"fixed","source":"independent arithmetic fixture","price_basis":"bid_ask"}
+    ds={"identifier":"independent-reference-fixture","content_hash":"fixed","source":"independent arithmetic fixture","price_basis":"bid_ask","eligible_for_backtest":True}
     a=run(strategy(),rows(),initial_balance=10000,dataset=ds,costs=CostModel())
     b=run(strategy(),rows(),initial_balance=10000,dataset=ds,costs=CostModel())
     assert a["metrics"]==b["metrics"] and a["trades"]==b["trades"]
@@ -23,7 +23,7 @@ def test_replay_is_deterministic_except_run_identity():
     assert all(t["entry_time"]!=i["decision_candle"] for t,i in zip(a["trades"],a["order_intents"]))
 
 def test_cost_stress_cannot_improve_results():
-    ds={"identifier":"fixture","content_hash":"fixed","source":"fixture","price_basis":"bid_ask"}
+    ds={"identifier":"fixture","content_hash":"fixed","source":"fixture","price_basis":"bid_ask","eligible_for_backtest":True}
     base=run(strategy(),rows(),initial_balance=10000,dataset=ds,costs=CostModel(slippage_pips=0,commission_per_lot_round_turn=0))
     stress=run(strategy(),rows(),initial_balance=10000,dataset=ds,costs=CostModel(slippage_pips=1,commission_per_lot_round_turn=12))
     assert stress["metrics"]["net_profit"] <= base["metrics"]["net_profit"]
