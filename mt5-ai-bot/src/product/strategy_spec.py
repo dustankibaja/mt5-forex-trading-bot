@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from copy import deepcopy
 from typing import Any
@@ -42,6 +43,8 @@ def _number(value: Any, path: str, *, minimum: float | None = None, maximum: flo
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise StrategyValidationError(f"{path} must be a number")
     result = float(value)
+    if not math.isfinite(result):
+        raise StrategyValidationError(f"{path} must be finite")
     if minimum is not None and result < minimum:
         raise StrategyValidationError(f"{path} must be at least {minimum}")
     if maximum is not None and result > maximum:
@@ -49,34 +52,53 @@ def _number(value: Any, path: str, *, minimum: float | None = None, maximum: flo
     return result
 
 
+def _integer(value: Any, path: str, *, minimum: int = 1, maximum: int = 100000) -> int:
+    number = _number(value, path, minimum=minimum, maximum=maximum)
+    if not number.is_integer():
+        raise StrategyValidationError(f"{path} must be an integer")
+    return int(number)
+
+
 def _operand(value: Any, path: str) -> None:
     if not isinstance(value, dict) or set(value) - {"type", "field", "indicator", "period", "fast", "slow", "signal", "component", "value"}:
         raise StrategyValidationError(f"{path} contains unsupported fields")
     kind = value.get("type")
     if kind == "price":
+        if set(value) != {"type", "field"}:
+            raise StrategyValidationError(f"{path} has inconsistent price fields")
         if value.get("field") not in PRICE_FIELDS:
             raise StrategyValidationError(f"{path}.field is unsupported")
     elif kind == "constant":
+        if set(value) != {"type", "value"}:
+            raise StrategyValidationError(f"{path} has inconsistent constant fields")
         _number(value.get("value"), f"{path}.value")
     elif kind == "indicator":
         name = value.get("indicator")
         if name not in INDICATORS:
             raise StrategyValidationError(f"{path}.indicator is unsupported")
         if name == "MACD":
-            fast = int(_number(value.get("fast"), f"{path}.fast", minimum=1, maximum=500))
-            slow = int(_number(value.get("slow"), f"{path}.slow", minimum=2, maximum=500))
-            _number(value.get("signal"), f"{path}.signal", minimum=1, maximum=500)
+            if set(value) - {"type", "indicator", "fast", "slow", "signal", "component"}:
+                raise StrategyValidationError(f"{path} has inconsistent MACD fields")
+            fast = _integer(value.get("fast"), f"{path}.fast", minimum=1, maximum=500)
+            slow = _integer(value.get("slow"), f"{path}.slow", minimum=2, maximum=500)
+            _integer(value.get("signal"), f"{path}.signal", minimum=1, maximum=500)
             if fast >= slow:
                 raise StrategyValidationError(f"{path}.fast must be less than slow")
             if value.get("component", "line") not in {"line", "signal", "histogram"}:
                 raise StrategyValidationError(f"{path}.component is unsupported")
         else:
-            _number(value.get("period"), f"{path}.period", minimum=1, maximum=500)
+            if set(value) != {"type", "indicator", "period"}:
+                raise StrategyValidationError(f"{path} has inconsistent indicator fields")
+            _integer(value.get("period"), f"{path}.period", minimum=1, maximum=500)
     else:
         raise StrategyValidationError(f"{path}.type is unsupported")
 
 
-def _condition(node: Any, path: str, depth: int = 0) -> None:
+def _condition(node: Any, path: str, depth: int = 0, budget: list[int] | None = None) -> None:
+    budget = [0] if budget is None else budget
+    budget[0] += 1
+    if budget[0] > 128:
+        raise StrategyValidationError("strategy condition complexity exceeds 128 nodes")
     if depth > 8 or not isinstance(node, dict):
         raise StrategyValidationError(f"{path} is too deeply nested or malformed")
     kind = node.get("type")
@@ -87,7 +109,7 @@ def _condition(node: Any, path: str, depth: int = 0) -> None:
         if not isinstance(children, list) or not children:
             raise StrategyValidationError(f"{path}.conditions cannot be empty")
         for index, child in enumerate(children):
-            _condition(child, f"{path}.conditions[{index}]", depth + 1)
+            _condition(child, f"{path}.conditions[{index}]", depth + 1, budget)
     elif kind == "comparison":
         if set(node) != {"type", "left", "operator", "right"} or node.get("operator") not in OPERATORS:
             raise StrategyValidationError(f"{path} comparison is invalid")
@@ -109,7 +131,7 @@ def validate_strategy(raw: Any, *, verify_hash: bool = True) -> dict[str, Any]:
         raise StrategyValidationError(f"schema_version must be {SCHEMA_VERSION}")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", str(strategy.get("strategy_id", ""))):
         raise StrategyValidationError("strategy_id must be a stable lowercase identifier")
-    if not isinstance(strategy.get("version"), int) or strategy["version"] < 1:
+    if isinstance(strategy.get("version"), bool) or not isinstance(strategy.get("version"), int) or strategy["version"] < 1:
         raise StrategyValidationError("version must be a positive immutable integer")
     if not str(strategy.get("name", "")).strip() or len(str(strategy["name"])) > 80:
         raise StrategyValidationError("name is required and must be at most 80 characters")
@@ -139,7 +161,7 @@ def validate_strategy(raw: Any, *, verify_hash: bool = True) -> dict[str, Any]:
         raise StrategyValidationError("exits are incomplete")
     _number(exits.get("stop_loss_pips"), "exits.stop_loss_pips", minimum=0.1, maximum=10000)
     _number(exits.get("take_profit_pips"), "exits.take_profit_pips", minimum=0.1, maximum=10000)
-    _number(exits.get("maximum_holding_candles"), "exits.maximum_holding_candles", minimum=1, maximum=100000)
+    _integer(exits.get("maximum_holding_candles"), "exits.maximum_holding_candles", minimum=1, maximum=100000)
     if not isinstance(exits.get("opposite_signal"), bool):
         raise StrategyValidationError("exits.opposite_signal must be true or false")
     expected = configuration_hash(strategy)

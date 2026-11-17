@@ -75,9 +75,10 @@ def _series(operand: dict[str, Any], candles: list[dict[str, Any]]) -> list[floa
     return [float("nan") if isnan(a) or isnan(b) else a - b for a, b in zip(line, signal_values)]
 
 
-def validate_candles(candles: Any) -> list[dict[str, Any]]:
+def validate_candles(candles: Any, timeframe: str = "H1") -> list[dict[str, Any]]:
     if not isinstance(candles, list) or len(candles) < 2: raise CandleValidationError("at least two ordered completed candles are required")
-    normalized, previous = [], None
+    seconds = {"M15": 900, "H1": 3600, "H4": 14400, "D1": 86400}[timeframe]
+    normalized, previous, series_source, series_basis = [], None, None, None
     for index, raw in enumerate(candles):
         if not isinstance(raw, dict) or set(raw) != {"timestamp", "open", "high", "low", "close", "complete", "source", "price_basis"}:
             raise CandleValidationError(f"candle {index} is malformed")
@@ -86,14 +87,25 @@ def validate_candles(candles: Any) -> list[dict[str, Any]]:
         try: stamp = datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00"))
         except ValueError as error: raise CandleValidationError(f"candle {index} timestamp is invalid") from error
         if stamp.tzinfo is None: raise CandleValidationError(f"candle {index} timestamp must include timezone")
-        if previous is not None and stamp <= previous: raise CandleValidationError("candles must be strictly ordered without duplicates")
+        stamp = stamp.astimezone(timezone.utc)
+        if int(stamp.timestamp()) % seconds != 0: raise CandleValidationError(f"candle {index} is not aligned to {timeframe}")
+        if previous is not None:
+            delta = int((stamp - previous).total_seconds())
+            if delta <= 0: raise CandleValidationError("candles must be strictly ordered without duplicates")
+            if delta != seconds:
+                spans_weekend = previous.weekday() == 4 and stamp.weekday() in {0, 6}
+                if delta % seconds or not spans_weekend: raise CandleValidationError("unexpected missing candles outside an allowed weekend market closure")
         previous = stamp
         candle = {**raw, "timestamp": stamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")}
         for key in ("open", "high", "low", "close"):
+            if isinstance(raw[key], bool): raise CandleValidationError(f"candle {index}.{key} is invalid")
             try: candle[key] = float(raw[key])
             except (TypeError, ValueError) as error: raise CandleValidationError(f"candle {index}.{key} is invalid") from error
+            if not np.isfinite(candle[key]) or candle[key] <= 0: raise CandleValidationError(f"candle {index}.{key} must be finite and positive")
         if candle["low"] > min(candle["open"], candle["close"]) or candle["high"] < max(candle["open"], candle["close"]) or candle["low"] > candle["high"]:
             raise CandleValidationError(f"candle {index} OHLC is inconsistent")
+        if series_source is None: series_source, series_basis = candle["source"], candle["price_basis"]
+        if candle["source"] != series_source or candle["price_basis"] != series_basis: raise CandleValidationError("candle source and price_basis must be consistent across the series")
         normalized.append(candle)
     return normalized
 
@@ -113,7 +125,8 @@ def _evaluate_node(node: dict[str, Any], candles: list[dict[str, Any]], index: i
 
 
 def evaluate(strategy_raw: dict[str, Any], candles_raw: list[dict[str, Any]], *, evaluated_at: str | None = None) -> dict[str, Any]:
-    strategy, candles = validate_strategy(strategy_raw), validate_candles(candles_raw)
+    strategy = validate_strategy(strategy_raw)
+    candles = validate_candles(candles_raw, strategy["timeframe"])
     index = len(candles) - 1
     stamp = datetime.fromisoformat(candles[index]["timestamp"].replace("Z", "+00:00"))
     session = strategy["session"]
@@ -127,10 +140,11 @@ def evaluate(strategy_raw: dict[str, Any], candles_raw: list[dict[str, Any]], *,
 
 
 def preview(strategy: dict[str, Any], candles: list[dict[str, Any]]) -> dict[str, Any]:
-    validated = validate_candles(candles)
+    checked_strategy = validate_strategy(strategy)
+    validated = validate_candles(candles, checked_strategy["timeframe"])
     decisions, rejected = [], 0
     for end in range(2, len(validated) + 1):
-        try: decisions.append(evaluate(strategy, validated[:end]))
+        try: decisions.append(evaluate(checked_strategy, validated[:end]))
         except CandleValidationError as error:
             if "warm-up" in str(error): rejected += 1
             else: raise
