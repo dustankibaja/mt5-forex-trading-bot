@@ -60,7 +60,8 @@ def test_exact_crossover_timing_neutral_and_replay():
     again = evaluate(strategy(), deepcopy(data), evaluated_at="2026-02-01T00:00:00Z")
     assert result == again
     assert result["decision"] == "long"
-    assert result["long"]["previous_left"] <= result["long"]["previous_right"]
+    comparison_result = result["long"]["children"][0]
+    assert comparison_result["previous_left"] <= comparison_result["previous_right"]
     neutral = evaluate(strategy(), candles([1, 2, 3, 4, 5, 6]))
     assert neutral["decision"] == "neutral"
     assert result["execution_enabled"] is False
