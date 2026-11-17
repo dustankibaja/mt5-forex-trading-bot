@@ -37,13 +37,15 @@ class LocalRuleInterpreter:
         ema = re.search(r"(?:the\s+)?(\d+)\s*(ema|sma)\s+cross(?:es)?\s+above\s+(?:the\s+)?(\d+)\s*(?:ema|sma)", lower)
         below = re.search(r"(?:the\s+)?(\d+)\s*(ema|sma)\s+cross(?:es)?\s+below\s+(?:the\s+)?(\d+)\s*(?:ema|sma)", lower)
         rsi = re.search(r"rsi\s*(\d+)\s+cross(?:es)?\s+above\s+(\d+(?:\.\d+)?)", lower)
-        trend = re.search(r"price\s+is\s+above\s+(?:the\s+)?(\d+)\s*(ema|sma)", lower)
+        trend = re.search(r"price\s+is\s+above\s+(?:(?:the\s+)?(\d+)\s*(ema|sma)|(ema|sma)\s*(\d+))", lower)
         if ema: facts["long"] = _comparison(_indicator(ema.group(2).upper(), int(ema.group(1))), "crosses_above", _indicator(ema.group(2).upper(), int(ema.group(3))))
         if below: facts["short"] = _comparison(_indicator(below.group(2).upper(), int(below.group(1))), "crosses_below", _indicator(below.group(2).upper(), int(below.group(3))))
         if rsi:
             rule = _comparison(_indicator("RSI", int(rsi.group(1))), "crosses_above", {"type": "constant", "value": float(rsi.group(2))})
             if trend:
-                filter_rule = _comparison({"type": "price", "field": "close"}, "greater_than", _indicator(trend.group(2).upper(), int(trend.group(1))))
+                trend_period = int(trend.group(1) or trend.group(4))
+                trend_name = (trend.group(2) or trend.group(3)).upper()
+                filter_rule = _comparison({"type": "price", "field": "close"}, "greater_than", _indicator(trend_name, trend_period))
                 rule = {"type": "group", "operator": "AND", "conditions": [rule, filter_rule]}
             facts["long"] = rule
         missing, questions = [], []
