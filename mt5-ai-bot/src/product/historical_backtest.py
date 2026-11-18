@@ -4,7 +4,7 @@ import hashlib,json,math,uuid
 from dataclasses import dataclass,asdict
 from typing import Any
 from .strategy_spec import validate_strategy
-from .strategy_evaluator import _evaluate_node,validate_candles
+from .strategy_evaluator import CandleValidationError,_evaluate_node,validate_candles
 
 MODEL_VERSION="historical-bidask-v2"; PIP=.0001
 @dataclass(frozen=True)
@@ -30,7 +30,9 @@ def _session(stamp:str,s:dict[str,Any])->bool:
     return start<=hm<end if start<end else hm>=start or hm<end
 def _signal(strategy:dict[str,Any],candles:list[dict[str,Any]],decision:int)->str|None:
     try:lp,_=_evaluate_node(strategy["long_entry"],candles[:decision+1],decision);sp,_=_evaluate_node(strategy["short_entry"],candles[:decision+1],decision)
-    except Exception:return None
+    except CandleValidationError as error:
+        if "warm-up" in str(error):return None
+        raise
     return "long" if lp and not sp else "short" if sp and not lp else None
 def _unrealized(p:dict[str,Any]|None,row:dict[str,Any],c:CostModel)->float:
     if not p:return 0.
@@ -43,7 +45,7 @@ def _exit(position:dict[str,Any],price:float,stamp:str,reason:str,balance:float,
     net=gross-commission-financing
     return balance+net,{**position,"exit_time":stamp,"exit":price,"reason":reason,"gross_pnl":gross,"commission":commission,"financing":financing,"net_pnl":net}
 
-def run(strategy_raw:dict[str,Any],rows:list[dict[str,Any]],*,initial_balance:float,dataset:dict[str,Any],costs:CostModel=CostModel())->dict[str,Any]:
+def run(strategy_raw:dict[str,Any],rows:list[dict[str,Any]],*,initial_balance:float,dataset:dict[str,Any],costs:CostModel=CostModel(),trade_start:str|None=None,trade_end:str|None=None)->dict[str,Any]:
     strategy=validate_strategy(strategy_raw);_validate_costs(costs);initial_balance=_finite(initial_balance,"initial balance",positive=True)
     if not strategy["confirmed_for_testing"]:raise ValueError("strategy must be confirmed for historical signal testing")
     required={"identifier","content_hash","source","price_basis"}
@@ -59,12 +61,13 @@ def run(strategy_raw:dict[str,Any],rows:list[dict[str,Any]],*,initial_balance:fl
     balance=initial_balance;position=None;trades=[];rejected=[];intents=[];equity=[];peak=initial_balance;max_dd=0.;hours={"M15":.25,"H1":1.,"H4":4.,"D1":24.}[strategy["timeframe"]]
     for i in range(2,len(rows)):
         row=rows[i];stamp=candles[i]["timestamp"];signal=_signal(strategy,candles,i-1);opened=False
+        trading_enabled=(trade_start is None or stamp[:10]>=trade_start) and (trade_end is None or stamp[:10]<=trade_end)
         # OPEN EVENT: only prior completed-candle information is available here.
         if position and ((strategy["exits"]["opposite_signal"] and signal and signal!=position["side"]) or i-position["index"]>=strategy["exits"]["maximum_holding_candles"]):
             reason="opposite_signal" if signal and signal!=position["side"] else "maximum_holding"
             px=(row["bid_open"]-costs.slippage_pips*PIP) if position["side"]=="long" else (row["ask_open"]+costs.slippage_pips*PIP)
             balance,t=_exit(position,px,stamp,reason,balance,costs,i);trades.append(t);position=None
-        if signal:
+        if signal and trading_enabled:
             intent={"decision_candle":candles[i-1]["timestamp"],"eligible_quote":stamp,"side":signal};intents.append(intent)
             if not _session(stamp,strategy["session"]):rejected.append({**intent,"reason":"outside_session"})
             elif position:rejected.append({**intent,"reason":"maximum_open_positions"})
@@ -98,5 +101,5 @@ def run(strategy_raw:dict[str,Any],rows:list[dict[str,Any]],*,initial_balance:fl
     wins=[t for t in trades if t["net_pnl"]>0];losses=[t for t in trades if t["net_pnl"]<0];gp=sum(t["net_pnl"] for t in wins);gl=-sum(t["net_pnl"] for t in losses)
     metrics={"realized_balance":balance,"realized_pnl":balance-initial_balance,"unrealized_pnl":unrealized,"ending_equity":total,"net_profit":total-initial_balance,"return_percent":(total/initial_balance-1)*100,"closed_trades":len(trades),"winning_trades":len(wins),"losing_trades":len(losses),"win_rate_percent":len(wins)/len(trades)*100 if trades else None,"profit_factor":gp/gl if gl else None,"maximum_drawdown_percent":max_dd*100,"average_trade":sum(t["net_pnl"] for t in trades)/len(trades) if trades else None,"trading_costs":sum(t["commission"]+t["financing"] for t in trades),"open_positions":1 if position else 0}
     warnings=(["Fewer than 30 completed trades; results are statistically weak."] if len(trades)<30 else [])+["Same-bar stop/target ambiguity is resolved adversely at the stop.","Contract, leverage, financing and commission assumptions are user supplied and not verified by the dataset."]
-    manifest={"strategy_id":strategy["strategy_id"],"strategy_version":strategy["version"],"strategy_hash":strategy["configuration_hash"],"dataset":dataset,"date_range":[candles[0]["timestamp"],candles[-1]["timestamp"]],"warmup_policy":"signals suppressed until every indicator operand is finite","execution_model":MODEL_VERSION,"cost_model":asdict(costs),"timestamp_convention":"UTC completed-candle open timestamps; session start inclusive/end exclusive","run_id":str(uuid.uuid4()),"warnings":warnings}
+    manifest={"strategy_id":strategy["strategy_id"],"strategy_version":strategy["version"],"strategy_hash":strategy["configuration_hash"],"dataset":dataset,"date_range":[candles[0]["timestamp"],candles[-1]["timestamp"]],"evaluation_range":[trade_start,trade_end],"warmup_policy":"pre-start candles initialize indicators; entries are prohibited before selected start","execution_model":MODEL_VERSION,"cost_model":asdict(costs),"timestamp_convention":"UTC completed-candle open timestamps; session start inclusive/end exclusive","run_id":str(uuid.uuid4()),"warnings":warnings}
     result={"metrics":metrics,"trades":trades,"open_position":position,"rejected_signals":rejected,"order_intents":intents,"equity_curve":equity,"manifest":manifest,"execution_enabled":False};manifest["simulation_result_hash"]=_hash(result);return result
