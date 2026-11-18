@@ -1,5 +1,7 @@
 from datetime import datetime,timedelta,timezone
+from src.product import historical_backtest
 from src.product.historical_backtest import CostModel,run
+from src.product import historical_backtest
 from src.product.strategy_spec import validate_strategy
 
 def strategy():
@@ -27,3 +29,16 @@ def test_cost_stress_cannot_improve_results():
     base=run(strategy(),rows(),initial_balance=10000,dataset=ds,costs=CostModel(slippage_pips=0,commission_per_lot_round_turn=0))
     stress=run(strategy(),rows(),initial_balance=10000,dataset=ds,costs=CostModel(slippage_pips=1,commission_per_lot_round_turn=12))
     assert stress["metrics"]["net_profit"] <= base["metrics"]["net_profit"]
+
+def test_pre_start_candles_warm_indicators_but_cannot_trade():
+    ds={"identifier":"fixture","content_hash":"fixed","source":"fixture","price_basis":"bid_ask","eligible_for_backtest":True}
+    result=run(strategy(),rows(),initial_balance=10000,dataset=ds,trade_start="2025-01-06",trade_end="2025-01-06")
+    assert all(intent["eligible_quote"][:10] >= "2025-01-06" for intent in result["order_intents"])
+    assert result["manifest"]["warmup_policy"].startswith("pre-start candles")
+
+def test_unexpected_signal_error_is_not_silently_neutral(monkeypatch):
+    ds={"identifier":"fixture","content_hash":"fixed","source":"fixture","price_basis":"bid_ask","eligible_for_backtest":True}
+    monkeypatch.setattr(historical_backtest,"_evaluate_node",lambda *a,**k:(_ for _ in ()).throw(RuntimeError("broken evaluator")))
+    import pytest
+    with pytest.raises(RuntimeError,match="broken evaluator"):
+        run(strategy(),rows(),initial_balance=10000,dataset=ds)

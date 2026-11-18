@@ -21,13 +21,17 @@ class FakeMT5:
         self.order_calls = 0
 
     def terminal_info(self):
-        return SimpleNamespace(connected=self.connected, trade_allowed=self.allowed)
+        return SimpleNamespace(connected=self.connected, trade_allowed=self.allowed,
+                               tradeapi_disabled=not self.allowed,
+                               path=r"C:\\Program Files\\MetaTrader 5",
+                               data_path=r"C:\\Users\\demo\\Terminal\\ABC")
 
     def account_info(self):
         return SimpleNamespace(trade_mode=self.mode,
                                trade_allowed=self.allowed, trade_expert=self.allowed,
                                balance=self.balance, margin_free=self.balance * 0.95,
                                currency="USD", login=111111111,
+                               server="Broker-Demo", margin_mode=2,
                                password="NEVER_EXPORT")
 
     def symbol_info(self, symbol):
@@ -35,7 +39,11 @@ class FakeMT5:
         return SimpleNamespace(visible=True, trade_mode=4, point=0.00001,
                                digits=5, volume_min=self.min_lot,
                                volume_max=100.0, volume_step=0.01,
-                               trade_stops_level=10)
+                               trade_stops_level=10, trade_freeze_level=0,
+                               trade_contract_size=100000.0, filling_mode=3)
+
+    def positions_get(self): return ()
+    def orders_get(self): return ()
 
     def symbol_info_tick(self, symbol):
         return SimpleNamespace(ask=1.14000 + self.spread * 0.0001,
@@ -67,6 +75,8 @@ def test_healthy_demo_allows_mechanical_review_without_orders():
     assert "111111111" not in visible
     assert "NEVER_EXPORT" not in visible
     assert result.public_report()["order_execution_enabled"] is False
+    assert result.public_report()["existing_positions"] == 0
+    assert result.public_report()["terminal_identity"]
 
 
 def test_live_account_blocked_even_if_all_other_conditions_good():

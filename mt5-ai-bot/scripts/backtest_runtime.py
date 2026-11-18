@@ -40,12 +40,9 @@ def main()->int:
             strategy=validate_strategy(req.get("strategy"));
             if ds.get("timeframe")!=strategy["timeframe"]:raise ValueError("dataset timeframe does not match the strategy")
             start,end=req.get("start_date"),req.get("end_date")
-            if start:
-                rows=[r for r in rows if r["timestamp"][:10]>=start]
-            if end:
-                rows=[r for r in rows if r["timestamp"][:10]<=end]
-            if len(rows)<3:raise ValueError("selected date range has insufficient completed candles")
-            costs=CostModel(**(req.get("cost_model") or {}));result=run(strategy,rows,initial_balance=req.get("initial_balance"),dataset=ds,costs=costs);result["contract_version"]=CONTRACT_VERSION
+            selected=[r for r in rows if (not start or r["timestamp"][:10]>=start) and (not end or r["timestamp"][:10]<=end)]
+            if len(selected)<3:raise ValueError("selected date range has insufficient completed candles")
+            costs=CostModel(**(req.get("cost_model") or {}));result=run(strategy,rows,initial_balance=req.get("initial_balance"),dataset=ds,costs=costs,trade_start=start,trade_end=end);result["contract_version"]=CONTRACT_VERSION
         print(json.dumps(result,sort_keys=True,separators=(",",":"),allow_nan=False));return 0
     except Exception as error:
         print(json.dumps({"contract_version":CONTRACT_VERSION,"error":str(error),"execution_enabled":False}),file=sys.stderr);return 2

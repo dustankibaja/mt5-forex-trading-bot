@@ -7,6 +7,7 @@ or change the existing DRY_RUN/require-demo safety boundary.
 from __future__ import annotations
 
 import math
+import hashlib
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +26,15 @@ class DemoReadiness:
     min_lot: float | None
     spread_pips: float | None
     broker_margin_at_min_lot: float | None
+    account_identity: str | None
+    terminal_identity: str | None
+    existing_positions: int | None
+    pending_orders: int | None
+    filling_modes: tuple[int, ...]
+    stop_level_points: int | None
+    freeze_level_points: int | None
+    contract_size: float | None
+    margin_mode: int | None
 
     def public_report(self) -> dict[str, Any]:
         """Allowlisted diagnostics, no account number, name or server."""
@@ -38,6 +48,15 @@ class DemoReadiness:
             "min_lot": self.min_lot,
             "spread_pips": self.spread_pips,
             "broker_margin_at_min_lot": self.broker_margin_at_min_lot,
+            "account_identity": self.account_identity,
+            "terminal_identity": self.terminal_identity,
+            "existing_positions": self.existing_positions,
+            "pending_orders": self.pending_orders,
+            "filling_modes": list(self.filling_modes),
+            "stop_level_points": self.stop_level_points,
+            "freeze_level_points": self.freeze_level_points,
+            "contract_size": self.contract_size,
+            "margin_mode": self.margin_mode,
             "order_execution_enabled": False,
             "profitable_strategy_verified": False,
         }
@@ -67,6 +86,11 @@ def inspect_demo_execution_conditions(
     stop_loss: float | None = None
     spread: float | None = None
     margin: float | None = None
+    account_identity = terminal_identity = None
+    existing_positions = pending_orders = None
+    filling_modes: tuple[int, ...] = ()
+    stop_level = freeze_level = margin_mode = None
+    contract_size = None
 
     if not (0 < max_risk_pct <= 0.25):
         raise ValueError("Preflight uses no more than 0.25% simulated risk per trade")
@@ -81,6 +105,8 @@ def inspect_demo_execution_conditions(
         blockers.append("Broker account is not verified DEMO")
     if terminal is not None and not bool(getattr(terminal, "trade_allowed", False)):
         blockers.append("MT5 desktop Algo Trading is not enabled")
+    if terminal is not None and bool(getattr(terminal, "tradeapi_disabled", False)):
+        blockers.append("External Python trading permission is disabled")
     if account is not None and not bool(getattr(account, "trade_allowed", False)):
         blockers.append("Broker account does not allow trading")
     if account is not None and not bool(getattr(account, "trade_expert", False)):
@@ -100,11 +126,36 @@ def inspect_demo_execution_conditions(
     if not (_finite_positive(balance) and _finite_positive(margin_free)):
         blockers.append("Invalid broker balance or free margin")
     if account is not None:
+        login, server = getattr(account, "login", None), getattr(account, "server", None)
+        if isinstance(login, int) and login > 0 and isinstance(server, str) and server:
+            digest = hashlib.sha256(f"{server}|{login}".encode()).hexdigest()
+            account_identity = f"••••{str(login)[-4:]} · {server[:3]}… · {digest[:12]}"
+        else:
+            blockers.append("Verified account identity is unavailable")
+        margin_mode = getattr(account, "margin_mode", None)
         raw_currency = getattr(account, "currency", None)
         if isinstance(raw_currency, str) and 3 <= len(raw_currency) <= 5 and raw_currency.isalpha():
             currency = raw_currency.upper()
         else:
             blockers.append("Unexpected broker account currency")
+
+    if terminal is not None:
+        terminal_path = getattr(terminal, "path", None)
+        data_path = getattr(terminal, "data_path", None)
+        if all(isinstance(value, str) and value for value in (terminal_path, data_path)):
+            terminal_identity = hashlib.sha256(f"{terminal_path}|{data_path}".encode()).hexdigest()[:16]
+        else:
+            blockers.append("Terminal executable/data-directory identity is unavailable")
+
+    positions_get, orders_get = getattr(api, "positions_get", None), getattr(api, "orders_get", None)
+    if not callable(positions_get) or not callable(orders_get):
+        blockers.append("Account-wide exposure APIs are unavailable")
+    else:
+        positions, orders = positions_get(), orders_get()
+        if positions is None or orders is None:
+            blockers.append("Account-wide positions or pending orders could not be read")
+        else:
+            existing_positions, pending_orders = len(positions), len(orders)
 
     if info is not None and tick is not None:
         point = getattr(info, "point", None)
@@ -112,6 +163,15 @@ def inspect_demo_execution_conditions(
         minimum = getattr(info, "volume_min", None)
         maximum = getattr(info, "volume_max", None)
         step = getattr(info, "volume_step", None)
+        stop_level = getattr(info, "trade_stops_level", None)
+        freeze_level = getattr(info, "trade_freeze_level", None)
+        contract_size = getattr(info, "trade_contract_size", None)
+        filling = getattr(info, "filling_mode", None)
+        if isinstance(filling, int):
+            filling_modes = tuple(mode for bit, mode in ((1, 0), (2, 1), (4, 2)) if filling & bit)
+        if not _finite_positive(contract_size): blockers.append("Invalid broker contract size")
+        if not isinstance(freeze_level, int) or freeze_level < 0: blockers.append("Invalid broker freeze level")
+        if not filling_modes: blockers.append("No supported broker filling mode reported")
         if not (isinstance(digits, int) and digits in (4, 5) and
                 all(_finite_positive(x) for x in (point, minimum, maximum, step)) and
                 minimum <= maximum):
@@ -170,4 +230,13 @@ def inspect_demo_execution_conditions(
         min_lot=volume,
         spread_pips=spread,
         broker_margin_at_min_lot=margin,
+        account_identity=account_identity,
+        terminal_identity=terminal_identity,
+        existing_positions=existing_positions,
+        pending_orders=pending_orders,
+        filling_modes=filling_modes,
+        stop_level_points=stop_level,
+        freeze_level_points=freeze_level,
+        contract_size=float(contract_size) if _finite_positive(contract_size) else None,
+        margin_mode=margin_mode,
     )
