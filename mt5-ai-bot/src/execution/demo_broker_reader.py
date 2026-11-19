@@ -12,23 +12,44 @@ from src.execution.demo_intent_journal import IntentBlocked
 
 
 @dataclass(frozen=True)
+class Exposure:
+    ticket: int
+    symbol: str
+    trade_type: int
+    volume: float
+    state: int | None
+
+
+@dataclass(frozen=True)
 class AccountObservation:
     binding: str
     received: datetime
     monotonic_ns: int
     equity: float
     balance: float
-    position_ids: tuple[int, ...]
-    pending_ids: tuple[int, ...]
+    positions: tuple[Exposure, ...]
+    pending: tuple[Exposure, ...]
 
 
-def _tickets(rows):
+def _exposure(rows, *, pending=False):
     if rows is None:
         raise IntentBlocked("Broker exposure unavailable")
-    result = tuple(sorted(row.ticket for row in rows))
-    if any(type(ticket) is not int or ticket <= 0 for ticket in result) or len(set(result)) != len(result):
-        raise IntentBlocked("Inconsistent broker ticket list")
-    return result
+    records = {}
+    for row in rows:
+        ticket = getattr(row, "ticket", None)
+        symbol = getattr(row, "symbol", None)
+        kind = getattr(row, "type", None)
+        volume = getattr(row, "volume_current" if pending else "volume", None)
+        state = getattr(row, "state", None) if pending else None
+        if (type(ticket) is not int or ticket <= 0 or ticket in records
+                or not isinstance(symbol, str) or not symbol.strip()
+                or type(kind) is not int or kind not in (range(2, 8) if pending else (0, 1))
+                or type(volume) not in (float, int) or not math.isfinite(volume) or volume <= 0
+                or pending and (type(state) is not int or state not in
+                                (mt5.ORDER_STATE_PLACED, mt5.ORDER_STATE_PARTIAL))):
+            raise IntentBlocked("Incomplete or ambiguous broker exposure")
+        records[ticket] = Exposure(ticket, symbol, kind, volume, state)
+    return tuple(records[key] for key in sorted(records))
 
 
 class PinnedBrokerReader:
@@ -45,15 +66,15 @@ class PinnedBrokerReader:
     def observe(self) -> AccountObservation:
         start = time.monotonic_ns()
         identity = self._identity()
-        positions = _tickets(mt5.positions_get())
-        orders = _tickets(mt5.orders_get())
+        positions = _exposure(mt5.positions_get())
+        orders = _exposure(mt5.orders_get(), pending=True)
         account = mt5.account_info()
         if account is None or account.trade_mode != mt5.ACCOUNT_TRADE_MODE_DEMO:
             raise IntentBlocked("Authenticated DEMO account unavailable")
         if any(type(v) not in (int, float) or not math.isfinite(v) or v <= 0
                for v in (account.balance, account.equity)):
             raise IntentBlocked("Broker equity or balance unavailable")
-        if positions != _tickets(mt5.positions_get()) or orders != _tickets(mt5.orders_get()):
+        if positions != _exposure(mt5.positions_get()) or orders != _exposure(mt5.orders_get(), pending=True):
             raise IntentBlocked("Exposure changed during observation")
         if identity != self._identity():
             raise IntentBlocked("Session changed during observation")

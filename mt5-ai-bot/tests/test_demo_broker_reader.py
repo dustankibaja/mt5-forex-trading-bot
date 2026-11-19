@@ -40,3 +40,22 @@ def test_missing_exposure_disconnect_and_switch_block(session):
     with pytest.raises(IntentBlocked): adapter.observe()
     api.account_info().login += 1
     with pytest.raises(AccountBindingError): adapter.observe()
+
+
+def test_partial_volume_change_same_position_ticket_blocks(session):
+    adapter, api = session
+    snapshots = iter([(Row(ticket=7, symbol="EURUSD", type=0, volume=v),)
+                      for v in (.02, .01)])
+    api.positions_get = lambda: next(snapshots)
+    with pytest.raises(IntentBlocked, match="Exposure changed"):
+        adapter.observe()
+
+
+def test_account_switch_during_exposure_read_blocks(session):
+    adapter, api = session
+    def switch():
+        api.account_info().login = 999
+        return ()
+    api.orders_get = switch
+    with pytest.raises(AccountBindingError):
+        adapter.observe()
