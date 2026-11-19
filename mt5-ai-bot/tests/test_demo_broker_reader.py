@@ -72,4 +72,16 @@ def test_history_never_promotes_midday_baseline(session, tmp_path, history, reas
     journal = DemoIntentJournal(tmp_path / "ledger")
     adapter.record_equity(journal)
     assert reason in journal.db.execute("SELECT reason FROM risk_coverage").fetchone()[0]
+    expected = "INCOMPLETE" if history == () else "INVALIDATED"
+    assert journal.db.execute("SELECT status FROM risk_samples").fetchone() == (expected,)
+    journal.close()
+
+
+def test_restarted_reader_invalidates_same_day(session, tmp_path):
+    adapter, _ = session
+    journal = DemoIntentJournal(tmp_path / "ledger")
+    adapter.record_equity(journal)
+    reader.PinnedBrokerReader(adapter.binding_path).record_equity(journal)
+    assert journal.db.execute("SELECT status FROM risk_samples ORDER BY id").fetchall() == [
+        ("INCOMPLETE",), ("INVALIDATED",)]
     journal.close()

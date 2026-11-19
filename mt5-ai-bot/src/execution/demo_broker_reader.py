@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import math
 from pathlib import Path
 import time
+from uuid import uuid4
 
 import MetaTrader5 as mt5
 
@@ -55,6 +56,7 @@ def _exposure(rows, *, pending=False):
 class PinnedBrokerReader:
     def __init__(self, binding_path: Path):
         self.binding_path = binding_path
+        self._session = uuid4().hex
 
     def _identity(self):
         binding = verify_local_binding(mt5, self.binding_path)
@@ -100,6 +102,8 @@ class PinnedBrokerReader:
             elif any(getattr(row, "type", None) not in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL)
                      for row in history):
                 reason = "Account balance adjustment or unclassified deal needs review"
+            elif history:
+                reason = "Unattributed trading activity in broker history"
             if self._identity() != observation.binding or time.monotonic_ns() - observation.monotonic_ns > 2_000_000_000:
                 raise IntentBlocked("Session or history observation expired")
             db.execute("""CREATE TABLE IF NOT EXISTS risk_coverage(
@@ -107,6 +111,34 @@ class PinnedBrokerReader:
                 PRIMARY KEY(binding, utc_day))""")
             db.execute("INSERT OR REPLACE INTO risk_coverage VALUES(?,?,?)",
                        (observation.binding, day_start.date().isoformat(), reason))
+            db.execute("""CREATE TABLE IF NOT EXISTS risk_samples(
+                id INTEGER PRIMARY KEY, binding TEXT NOT NULL, day TEXT NOT NULL,
+                session TEXT NOT NULL, received TEXT NOT NULL, mono INTEGER NOT NULL,
+                equity REAL NOT NULL, status TEXT NOT NULL, reason TEXT NOT NULL)""")
+            day = day_start.date().isoformat()
+            prior = db.execute("""SELECT binding,day,session,received,mono,status,reason
+                                  FROM risk_samples ORDER BY id DESC LIMIT 1""").fetchone()
+            status = "INCOMPLETE"
+            if prior and prior[0] != observation.binding:
+                status, reason = "INVALIDATED", "Pinned identity changed"
+            elif prior and prior[1] == day:
+                elapsed = (observation.received - datetime.fromisoformat(prior[3])).total_seconds()
+                monotonic_elapsed = (observation.monotonic_ns - prior[4]) / 1e9
+                if prior[5] == "INVALIDATED":
+                    status, reason = prior[5:]
+                elif (prior[2] != self._session or not 0 < elapsed <= 2
+                      or not 0 < monotonic_elapsed <= 2 or abs(monotonic_elapsed - elapsed) > .25):
+                    status, reason = "INVALIDATED", "Observation continuity lost"
+                else:
+                    status = "OBSERVING"
+            if history is None or history or observation.positions or observation.pending:
+                status = "INVALIDATED"
+                if observation.positions or observation.pending:
+                    reason = "Account exposure requires attributed broker history"
+            db.execute("""INSERT INTO risk_samples(binding,day,session,received,mono,equity,status,reason)
+                          VALUES(?,?,?,?,?,?,?,?)""",
+                       (observation.binding, day, self._session, observation.received.isoformat(),
+                        observation.monotonic_ns, observation.equity, status, reason))
             db.execute("""CREATE TABLE IF NOT EXISTS observed_equity(
                 binding TEXT NOT NULL, utc_day TEXT NOT NULL, first_utc TEXT NOT NULL,
                 first_equity REAL NOT NULL, peak_equity REAL NOT NULL,
@@ -119,5 +151,7 @@ class PinnedBrokerReader:
             db.execute("COMMIT")
         except BaseException:
             db.rollback()
+            # A failed read breaks continuity even when the next read is prompt.
+            self._session = uuid4().hex
             raise
         return observation
