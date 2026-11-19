@@ -67,6 +67,11 @@ def test_verifies_existing_demo_but_keeps_execution_locked(tmp_path):
     assert {item["name"] for item in result["checks"]} >= {
         "Risk qualification", "Broker reconciliation"
     }
+    reconciliation = next(item for item in result["checks"]
+                          if item["name"] == "Broker reconciliation")
+    assert reconciliation["phase"] == "post_execution"
+    assert reconciliation["detail"].startswith("Untested:")
+    assert reconciliation["detail"] not in result["blockers"]
     assert "login" not in result
     assert api.shutdown_called
 

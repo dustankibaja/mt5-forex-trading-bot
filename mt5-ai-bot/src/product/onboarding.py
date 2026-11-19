@@ -118,7 +118,8 @@ def inspect_existing_demo(
         checks.append(_check(
             "Broker reconciliation",
             False,
-            "No authenticated Emtifize broker outcome has been observed for reconciliation",
+            "Untested: no Emtifize broker outcome exists yet. Reconciliation is required after a separately authorised supervised test, not to propose the first one.",
+            phase="post_execution",
         ))
 
         identity = None
@@ -136,14 +137,17 @@ def inspect_existing_demo(
                 masked = f"DEMO-{identity[:8].upper()}"
 
         account_verified = connected and is_demo and available and valid_quote and identity is not None
-        blockers = [item["detail"] for item in checks if not item["passed"]]
+        blockers = [
+            item["detail"] for item in checks
+            if not item["passed"] and item["phase"] == "pre_execution"
+        ]
         return {
             "schema": "emtifize-onboarding-v1",
             "account_verified": account_verified,
             "demo_only": True,
             "execution_allowed": False,
             "execution_blocked_reason": (
-                "DEMO execution stays locked until quote-time and product safety review pass."
+                "DEMO execution stays locked until pre-execution quote-time, risk, permission and product safety review pass."
             ),
             "terminal_path": str(terminal_path),
             "account_fingerprint": identity,
@@ -164,8 +168,21 @@ def inspect_existing_demo(
         api.shutdown()
 
 
-def _check(name: str, passed: bool, detail: str) -> dict[str, Any]:
-    return {"name": name, "passed": bool(passed), "detail": detail}
+def _check(
+    name: str,
+    passed: bool,
+    detail: str,
+    *,
+    phase: str = "pre_execution",
+) -> dict[str, Any]:
+    if phase not in {"pre_execution", "post_execution"}:
+        raise ValueError("Invalid readiness check phase")
+    return {
+        "name": name,
+        "passed": bool(passed),
+        "detail": detail,
+        "phase": phase,
+    }
 
 
 def _failure(message: str) -> dict[str, Any]:
