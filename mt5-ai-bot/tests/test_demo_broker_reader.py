@@ -12,7 +12,8 @@ def session(monkeypatch, tmp_path):
     account = Row(login=42, server="fixture", balance=10000., equity=10000., trade_mode=0)
     terminal = Row(path="terminal", data_path="data", connected=True)
     api = Row(ACCOUNT_TRADE_MODE_DEMO=0, account_info=lambda:account, terminal_info=lambda:terminal,
-              positions_get=lambda:(), orders_get=lambda:())
+              positions_get=lambda:(), orders_get=lambda:(), history_deals_get=lambda start,end:(),
+              DEAL_TYPE_BUY=0, DEAL_TYPE_SELL=1)
     monkeypatch.setattr(reader, "mt5", api)
     pin = tmp_path / "pin"
     create_local_binding(api, pin)
@@ -59,3 +60,16 @@ def test_account_switch_during_exposure_read_blocks(session):
     api.orders_get = switch
     with pytest.raises(AccountBindingError):
         adapter.observe()
+
+
+@pytest.mark.parametrize("history,reason", [
+    (None, "unavailable"), ((), "unverified"),
+    ((Row(type=2, profit=500),), "adjustment"), ((Row(type=2, profit=-500),), "adjustment"),
+])
+def test_history_never_promotes_midday_baseline(session, tmp_path, history, reason):
+    adapter, api = session
+    api.history_deals_get = lambda start,end: history
+    journal = DemoIntentJournal(tmp_path / "ledger")
+    adapter.record_equity(journal)
+    assert reason in journal.db.execute("SELECT reason FROM risk_coverage").fetchone()[0]
+    journal.close()

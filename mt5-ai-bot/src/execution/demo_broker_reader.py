@@ -90,6 +90,23 @@ class PinnedBrokerReader:
         db.execute("BEGIN IMMEDIATE")
         try:
             observation = self.observe()
+            # A broker balance operation can be a deposit, withdrawal or reset.
+            # Never infer opening equity from the first post-operation sample.
+            day_start = observation.received.replace(hour=0, minute=0, second=0, microsecond=0)
+            history = mt5.history_deals_get(day_start, observation.received)
+            reason = "Opening equity and continuous drawdown history unverified"
+            if history is None:
+                reason = "Broker deal history unavailable"
+            elif any(getattr(row, "type", None) not in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL)
+                     for row in history):
+                reason = "Account balance adjustment or unclassified deal needs review"
+            if self._identity() != observation.binding or time.monotonic_ns() - observation.monotonic_ns > 2_000_000_000:
+                raise IntentBlocked("Session or history observation expired")
+            db.execute("""CREATE TABLE IF NOT EXISTS risk_coverage(
+                binding TEXT NOT NULL, utc_day TEXT NOT NULL, reason TEXT NOT NULL,
+                PRIMARY KEY(binding, utc_day))""")
+            db.execute("INSERT OR REPLACE INTO risk_coverage VALUES(?,?,?)",
+                       (observation.binding, day_start.date().isoformat(), reason))
             db.execute("""CREATE TABLE IF NOT EXISTS observed_equity(
                 binding TEXT NOT NULL, utc_day TEXT NOT NULL, first_utc TEXT NOT NULL,
                 first_equity REAL NOT NULL, peak_equity REAL NOT NULL,
