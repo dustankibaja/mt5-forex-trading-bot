@@ -47,7 +47,7 @@ def test_missing_exposure_disconnect_and_switch_block(session):
 
 def test_partial_volume_change_same_position_ticket_blocks(session):
     adapter, api = session
-    snapshots = iter([(Row(ticket=7, symbol="EURUSD", type=0, volume=v),)
+    snapshots = iter([(Row(ticket=7, identifier=7, symbol="EURUSD", type=0, volume=v),)
                       for v in (.02, .01)])
     api.positions_get = lambda: next(snapshots)
     with pytest.raises(IntentBlocked, match="Exposure changed"):
@@ -99,6 +99,7 @@ def test_history_reconciliation_reports_partial_fill_from_linked_deals(session):
         requested_volume=.02, since_utc=datetime(2026,1,1,tzinfo=timezone.utc))
     assert result.status == "PARTIAL"
     assert result.deal_tickets == (12,)
+    assert result.timestamp_semantics == "UNVERIFIED_PROVIDER_CLOCK"
 
 
 def test_empty_position_cannot_prove_closure_without_closing_deal(session):
@@ -130,7 +131,7 @@ def test_open_reconciliation_captures_broker_protective_state(session):
         volume_initial=.01, time_setup_msc=1000),)
     api.history_deals_get = lambda start,end: (Row(ticket=12, order=11, position_id=13,
         symbol="EURUSD", type=0, volume=.01, time_msc=1100, entry=0),)
-    api.positions_get = lambda: (Row(ticket=13, symbol="EURUSD", type=0, volume=.01,
+    api.positions_get = lambda: (Row(ticket=13, identifier=13, symbol="EURUSD", type=0, volume=.01,
                                      sl=1.05, tp=1.15),)
     result = adapter.reconcile_order(order_ticket=11, symbol="EURUSD", side=0,
         requested_volume=.01, since_utc=datetime(2026,1,1,tzinfo=timezone.utc))
@@ -140,10 +141,66 @@ def test_open_reconciliation_captures_broker_protective_state(session):
 
 def test_invalid_protective_state_or_non_utc_start_blocks(session):
     adapter, api = session
-    api.positions_get = lambda: (Row(ticket=13, symbol="EURUSD", type=0, volume=.01,
+    api.positions_get = lambda: (Row(ticket=13, identifier=13, symbol="EURUSD", type=0, volume=.01,
                                      sl=float("nan"), tp=0.0),)
     with pytest.raises(IntentBlocked, match="exposure"):
         adapter.observe()
     with pytest.raises(IntentBlocked, match="explicitly UTC"):
         adapter.reconcile_order(order_ticket=11, symbol="EURUSD", side=0, requested_volume=.01,
             since_utc=datetime(2026,1,1,tzinfo=timezone(timedelta(hours=3))))
+
+
+def test_hedging_reconciliation_ignores_same_symbol_unrelated_position(session):
+    adapter, api = session
+    api.history_orders_get = lambda start,end: (Row(ticket=11, symbol="EURUSD", type=0,
+        volume_initial=.01, time_setup_msc=1000, position_id=13),)
+    api.history_deals_get = lambda start,end: (
+        Row(ticket=12, order=11, position_id=13, symbol="EURUSD", type=0, volume=.01, time_msc=1100, entry=0),
+        Row(ticket=14, order=99, position_id=13, symbol="EURUSD", type=1, volume=.01, time_msc=1200, entry=1),)
+    api.positions_get = lambda: (Row(ticket=40, identifier=40, symbol="EURUSD", type=0,
+                                     volume=.03, sl=0., tp=0.),)
+    result = adapter.reconcile_order(order_ticket=11, symbol="EURUSD", side=0,
+        requested_volume=.01, since_utc=datetime(2026,1,1,tzinfo=timezone.utc))
+    assert result.status == "CLOSED"
+    assert result.position_tickets == ()
+
+
+def test_multiple_closing_deals_are_required_to_cover_full_fill(session):
+    adapter, api = session
+    api.history_orders_get = lambda start,end: (Row(ticket=11, symbol="EURUSD", type=0,
+        volume_initial=.02, time_setup_msc=1000, position_id=13),)
+    api.history_deals_get = lambda start,end: (
+        Row(ticket=12, order=11, position_id=13, symbol="EURUSD", type=0, volume=.02, time_msc=1100, entry=0),
+        Row(ticket=14, order=99, position_id=13, symbol="EURUSD", type=1, volume=.01, time_msc=1200, entry=1),
+        Row(ticket=15, order=100, position_id=13, symbol="EURUSD", type=1, volume=.01, time_msc=1300, entry=1),)
+    result = adapter.reconcile_order(order_ticket=11, symbol="EURUSD", side=0,
+        requested_volume=.02, since_utc=datetime(2026,1,1,tzinfo=timezone.utc))
+    assert result.status == "CLOSED"
+
+
+def test_netting_reversal_needs_closing_deal_not_opposite_position_inference(session):
+    adapter, api = session
+    api.history_orders_get = lambda start,end: (Row(ticket=11, symbol="EURUSD", type=0,
+        volume_initial=.01, time_setup_msc=1000, position_id=13),)
+    api.history_deals_get = lambda start,end: (
+        Row(ticket=12, order=11, position_id=13, symbol="EURUSD", type=0, volume=.01, time_msc=1100, entry=0),
+        Row(ticket=14, order=99, position_id=13, symbol="EURUSD", type=1, volume=.01, time_msc=1200, entry=1),)
+    api.positions_get = lambda: (Row(ticket=13, identifier=13, symbol="EURUSD", type=1,
+                                     volume=.02, sl=1.2, tp=1.0),)
+    result = adapter.reconcile_order(order_ticket=11, symbol="EURUSD", side=0,
+        requested_volume=.01, since_utc=datetime(2026,1,1,tzinfo=timezone.utc))
+    assert result.status == "CLOSED"
+    assert result.current_position_volume == 0
+
+
+def test_session_switch_during_reconciliation_blocks(session):
+    adapter, api = session
+    api.history_orders_get = lambda start,end: (Row(ticket=11, symbol="EURUSD", type=0,
+        volume_initial=.01, time_setup_msc=1000),)
+    def switch(start, end):
+        api.account_info().login = 999
+        return ()
+    api.history_deals_get = switch
+    with pytest.raises(AccountBindingError):
+        adapter.reconcile_order(order_ticket=11, symbol="EURUSD", side=0,
+            requested_volume=.01, since_utc=datetime(2026,1,1,tzinfo=timezone.utc))

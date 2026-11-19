@@ -15,6 +15,7 @@ from src.execution.demo_intent_journal import IntentBlocked
 @dataclass(frozen=True)
 class Exposure:
     ticket: int
+    identifier: int | None
     symbol: str
     trade_type: int
     volume: float
@@ -46,6 +47,8 @@ class Reconciliation:
     raw_order_time_msc: int
     raw_deal_time_msc: tuple[int, ...]
     position_protection: tuple[tuple[int, float, float], ...]
+    position_tickets: tuple[int, ...]
+    timestamp_semantics: str
 
 
 def _exposure(rows, *, pending=False):
@@ -54,6 +57,7 @@ def _exposure(rows, *, pending=False):
     records = {}
     for row in rows:
         ticket = getattr(row, "ticket", None)
+        identifier = None if pending else getattr(row, "identifier", None)
         symbol = getattr(row, "symbol", None)
         kind = getattr(row, "type", None)
         volume = getattr(row, "volume_current" if pending else "volume", None)
@@ -61,6 +65,7 @@ def _exposure(rows, *, pending=False):
         stop_loss = getattr(row, "sl", 0.0)
         take_profit = getattr(row, "tp", 0.0)
         if (type(ticket) is not int or ticket <= 0 or ticket in records
+                or not pending and (type(identifier) is not int or identifier <= 0)
                 or not isinstance(symbol, str) or not symbol.strip()
                 or type(kind) is not int or kind not in (range(2, 8) if pending else (0, 1))
                 or type(volume) not in (float, int) or not math.isfinite(volume) or volume <= 0
@@ -69,7 +74,8 @@ def _exposure(rows, *, pending=False):
                 or pending and (type(state) is not int or state not in
                                 (mt5.ORDER_STATE_PLACED, mt5.ORDER_STATE_PARTIAL))):
             raise IntentBlocked("Incomplete or ambiguous broker exposure")
-        records[ticket] = Exposure(ticket, symbol, kind, volume, state, float(stop_loss), float(take_profit))
+        records[ticket] = Exposure(ticket, identifier, symbol, kind, volume, state,
+                                   float(stop_loss), float(take_profit))
     return tuple(records[key] for key in sorted(records))
 
 
@@ -202,18 +208,31 @@ class PinnedBrokerReader:
         raw_order_time = getattr(order, "time_setup_msc", None)
         if type(raw_order_time) is not int or raw_order_time <= 0:
             raise IntentBlocked("Broker order timestamp is unavailable")
+        order_position_id = getattr(order, "position_id", 0)
+        if type(order_position_id) is not int or order_position_id < 0:
+            raise IntentBlocked("Broker order position identifier is invalid")
         linked = [row for row in deals if getattr(row, "order", None) == order_ticket]
         if any(type(getattr(row, "ticket", None)) is not int or getattr(row, "ticket") <= 0
                or getattr(row, "symbol", None) != symbol or getattr(row, "type", None) not in (0, 1)
+               or getattr(row, "position_id", None) is None or type(getattr(row, "position_id")) is not int
+               or getattr(row, "position_id") <= 0
                or type(getattr(row, "time_msc", None)) is not int or getattr(row, "time_msc") <= 0
                for row in linked):
             raise IntentBlocked("Broker deal records are incomplete or mismatched")
+        if any(getattr(row, "entry", None) != getattr(mt5, "DEAL_ENTRY_IN", 0) for row in linked):
+            raise IntentBlocked("Broker opening deals have an unexpected entry state")
+        position_ids = {row.position_id for row in linked}
+        if len(position_ids) > 1 or order_position_id and position_ids and order_position_id not in position_ids:
+            raise IntentBlocked("Broker order and deal position identifiers disagree")
         filled = sum(float(getattr(row, "volume", 0)) for row in linked if getattr(row, "type", None) == side)
         if not math.isfinite(filled) or filled < 0 or filled > requested_volume + 1e-9:
             raise IntentBlocked("Broker filled volume is inconsistent")
         positions = _exposure(mt5.positions_get())
-        matching_positions = tuple(row for row in positions if row.symbol == symbol and row.trade_type == side)
-        position_volume = sum(row.volume for row in matching_positions)
+        matching_positions = tuple(row for row in positions if row.identifier in position_ids)
+        if any(row.symbol != symbol for row in matching_positions):
+            raise IntentBlocked("Broker position identifier has a mismatched symbol")
+        same_side_positions = tuple(row for row in matching_positions if row.trade_type == side)
+        position_volume = sum(row.volume for row in same_side_positions)
         if position_volume > filled + 1e-9:
             raise IntentBlocked("Current position exceeds authenticated filled volume")
         if binding != self._identity() or time.monotonic_ns() - start > 2_000_000_000:
@@ -227,14 +246,20 @@ class PinnedBrokerReader:
         else:
             # Empty positions alone never proves closure. A closing deal must reference
             # the same position identifier and account for the filled volume.
-            position_ids = {getattr(row, "position_id", None) for row in linked}
             closing = [row for row in deals if getattr(row, "position_id", None) in position_ids
                        and getattr(row, "entry", None) == getattr(mt5, "DEAL_ENTRY_OUT", -1)]
-            if not closing or sum(float(getattr(row, "volume", 0)) for row in closing) + 1e-9 < filled:
+            if (not closing or any(getattr(row, "symbol", None) != symbol
+                                   or getattr(row, "type", None) == side
+                                   or type(getattr(row, "time_msc", None)) is not int
+                                   or getattr(row, "time_msc") <= 0
+                                   for row in closing)
+                    or sum(float(getattr(row, "volume", 0)) for row in closing) + 1e-9 < filled):
                 raise IntentBlocked("Closure has no sufficient authenticated deal evidence")
             status = "CLOSED"
         return Reconciliation(binding, received, order_ticket,
                               tuple(sorted(row.ticket for row in linked)), filled, position_volume,
                               status, raw_order_time, tuple(row.time_msc for row in linked),
                               tuple((row.ticket, row.stop_loss, row.take_profit)
-                                    for row in matching_positions))
+                                    for row in matching_positions),
+                              tuple(row.ticket for row in matching_positions),
+                              "UNVERIFIED_PROVIDER_CLOCK")
