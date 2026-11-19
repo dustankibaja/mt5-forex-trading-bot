@@ -96,7 +96,13 @@ class DemoIntentJournal:
         row = self.db.execute("SELECT value FROM controls WHERE key='emergency_stop'").fetchone()
         return row is not None and row[0] == "1"
 
-    def reserve(self, intent: Mapping[str, Any], *, created_utc: str, risk_pct: float,
+    def reserve(self, *args, **kwargs):
+        raise IntentBlocked("Reservation requires internally measured account risk")
+
+    def transition(self, *args, **kwargs):
+        raise IntentBlocked("Caller-provided reconciliation evidence is prohibited")
+
+    def _record_reservation(self, intent: Mapping[str, Any], *, created_utc: str, risk_pct: float,
                 risk_evidence: Mapping[str, Any], max_account_exposure: int = 1) -> str:
         if not isinstance(created_utc, str) or not created_utc: raise IntentBlocked("Intent timestamp is required")
         risk = _finite(risk_pct)
@@ -127,7 +133,7 @@ class DemoIntentJournal:
             raise
         return intent_id
 
-    def transition(self, intent_id: str, status: str, *, recorded_utc: str,
+    def _record_transition(self, intent_id: str, status: str, *, recorded_utc: str,
                    evidence_source: str, evidence: Mapping[str, Any] | None = None,
                    expected_binding_id: str | None = None, broker_order: int | None = None,
                    broker_deal: int | None = None, note: str = "") -> None:

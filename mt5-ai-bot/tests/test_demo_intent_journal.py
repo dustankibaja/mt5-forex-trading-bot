@@ -2,7 +2,26 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from src.execution.demo_intent_journal import DemoIntentJournal, IntentBlocked, canonical_intent_id
+from src.execution.demo_intent_journal import DemoIntentJournal as ProductionJournal, IntentBlocked, canonical_intent_id
+
+
+class DemoIntentJournal(ProductionJournal):
+    """Exercise storage transitions only against pytest's temporary database."""
+    reserve = ProductionJournal._record_reservation
+    transition = ProductionJournal._record_transition
+
+
+def test_public_journal_rejects_self_attested_broker_and_risk_records(tmp_path):
+    journal = ProductionJournal(tmp_path / "production.sqlite3")
+    try:
+        with pytest.raises(IntentBlocked, match="internally measured"):
+            reserve(journal)
+        with pytest.raises(IntentBlocked, match="prohibited"):
+            move(journal, "invented", "CLOSED_RECONCILED", broker_order=1,
+                 evidence_source="mt5-broker-history", evidence={"closed": True})
+        assert journal.unreconciled() == []
+    finally:
+        journal.close()
 
 
 def plan(**changes):
