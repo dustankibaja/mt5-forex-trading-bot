@@ -110,6 +110,16 @@ def inspect_existing_demo(
             False,
             "Quote-time certification is still required before DEMO execution",
         ))
+        checks.append(_check(
+            "Risk qualification",
+            False,
+            "A verified UTC-day risk baseline has not completed its observation period",
+        ))
+        checks.append(_check(
+            "Broker reconciliation",
+            False,
+            "No authenticated Emtifize broker outcome has been observed for reconciliation",
+        ))
 
         identity = None
         masked = "Unavailable"

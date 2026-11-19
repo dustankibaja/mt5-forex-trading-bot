@@ -64,6 +64,9 @@ def test_verifies_existing_demo_but_keeps_execution_locked(tmp_path):
     assert result["account_label"].startswith("DEMO-")
     assert result["account_label"] == "DEMO-" + result["account_fingerprint"][:8].upper()
     assert result["quote"]["clock_certified"] is False
+    assert {item["name"] for item in result["checks"]} >= {
+        "Risk qualification", "Broker reconciliation"
+    }
     assert "login" not in result
     assert api.shutdown_called
 
