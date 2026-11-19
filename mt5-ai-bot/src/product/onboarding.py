@@ -11,6 +11,8 @@ import secrets
 import time
 from typing import Any, Iterable
 
+from src.execution.quote_time_certification import QuoteTimeCertifier, QuoteTimeState
+
 
 COMMON_TERMINALS = (
     Path(r"C:\Program Files\MetaTrader 5\terminal64.exe"),
@@ -104,11 +106,18 @@ def inspect_existing_demo(
         raw_tick_seconds = getattr(tick, "time", None) if tick else None
         receipt = time.time() if now_s is None else now_s
         raw_age = receipt - float(raw_tick_seconds) if _positive(raw_tick_seconds) else None
-        clock_certified = False
+        # This onboarding path intentionally has no independently bounded UTC
+        # evidence or broker-semantics attestation, so the certifier fails
+        # closed while retaining the raw broker fields below.
+        certification = QuoteTimeCertifier().assess(
+            tick, utc=None, semantics=None,
+        )
+        clock_certified = certification.state == QuoteTimeState.CERTIFIED
         checks.append(_check(
             "Execution clock",
-            False,
-            "Quote-time certification is still required before DEMO execution",
+            clock_certified,
+            certification.reason if clock_certified else
+            "Quote-time certification is still required before DEMO execution: " + certification.reason,
         ))
         checks.append(_check(
             "Risk qualification",
