@@ -32,6 +32,19 @@ class AccountObservation:
     pending: tuple[Exposure, ...]
 
 
+@dataclass(frozen=True)
+class Reconciliation:
+    binding: str
+    received: datetime
+    order_ticket: int
+    deal_tickets: tuple[int, ...]
+    filled_volume: float
+    current_position_volume: float
+    status: str
+    raw_order_time_msc: int
+    raw_deal_time_msc: tuple[int, ...]
+
+
 def _exposure(rows, *, pending=False):
     if rows is None:
         raise IntentBlocked("Broker exposure unavailable")
@@ -155,3 +168,63 @@ class PinnedBrokerReader:
             self._session = uuid4().hex
             raise
         return observation
+
+    def reconcile_order(self, *, order_ticket: int, symbol: str, side: int,
+                        requested_volume: float, since_utc: datetime) -> Reconciliation:
+        """Read authenticated broker history for one local intent. Never mutates MT5."""
+        if type(order_ticket) is not int or order_ticket <= 0 or side not in (0, 1):
+            raise IntentBlocked("Invalid reconciliation identifier")
+        if not isinstance(symbol, str) or not symbol or not math.isfinite(requested_volume) or requested_volume <= 0:
+            raise IntentBlocked("Invalid reconciliation expectation")
+        if since_utc.tzinfo is None:
+            raise IntentBlocked("Reconciliation start must be UTC-aware")
+        start = time.monotonic_ns()
+        binding = self._identity()
+        received = datetime.now(timezone.utc)
+        orders = mt5.history_orders_get(since_utc, received)
+        deals = mt5.history_deals_get(since_utc, received)
+        if orders is None or deals is None:
+            raise IntentBlocked("Broker history unavailable")
+        matching_orders = [row for row in orders if getattr(row, "ticket", None) == order_ticket]
+        if len(matching_orders) != 1:
+            raise IntentBlocked("Expected broker order record is missing or ambiguous")
+        order = matching_orders[0]
+        if (getattr(order, "symbol", None) != symbol or getattr(order, "type", None) != side
+                or not math.isclose(float(getattr(order, "volume_initial", 0)), requested_volume, rel_tol=0, abs_tol=1e-9)):
+            raise IntentBlocked("Broker order does not match local intent")
+        raw_order_time = getattr(order, "time_setup_msc", None)
+        if type(raw_order_time) is not int or raw_order_time <= 0:
+            raise IntentBlocked("Broker order timestamp is unavailable")
+        linked = [row for row in deals if getattr(row, "order", None) == order_ticket]
+        if any(type(getattr(row, "ticket", None)) is not int or getattr(row, "ticket") <= 0
+               or getattr(row, "symbol", None) != symbol or getattr(row, "type", None) not in (0, 1)
+               or type(getattr(row, "time_msc", None)) is not int or getattr(row, "time_msc") <= 0
+               for row in linked):
+            raise IntentBlocked("Broker deal records are incomplete or mismatched")
+        filled = sum(float(getattr(row, "volume", 0)) for row in linked if getattr(row, "type", None) == side)
+        if not math.isfinite(filled) or filled < 0 or filled > requested_volume + 1e-9:
+            raise IntentBlocked("Broker filled volume is inconsistent")
+        positions = _exposure(mt5.positions_get())
+        position_volume = sum(row.volume for row in positions if row.symbol == symbol and row.trade_type == side)
+        if position_volume > filled + 1e-9:
+            raise IntentBlocked("Current position exceeds authenticated filled volume")
+        if binding != self._identity() or time.monotonic_ns() - start > 2_000_000_000:
+            raise IntentBlocked("Session changed during reconciliation")
+        if not linked:
+            status = "UNKNOWN"
+        elif filled < requested_volume - 1e-9:
+            status = "PARTIAL"
+        elif position_volume > 0:
+            status = "OPEN"
+        else:
+            # Empty positions alone never proves closure. A closing deal must reference
+            # the same position identifier and account for the filled volume.
+            position_ids = {getattr(row, "position_id", None) for row in linked}
+            closing = [row for row in deals if getattr(row, "position_id", None) in position_ids
+                       and getattr(row, "entry", None) == getattr(mt5, "DEAL_ENTRY_OUT", -1)]
+            if not closing or sum(float(getattr(row, "volume", 0)) for row in closing) + 1e-9 < filled:
+                raise IntentBlocked("Closure has no sufficient authenticated deal evidence")
+            status = "CLOSED"
+        return Reconciliation(binding, received, order_ticket,
+                              tuple(sorted(row.ticket for row in linked)), filled, position_volume,
+                              status, raw_order_time, tuple(row.time_msc for row in linked))

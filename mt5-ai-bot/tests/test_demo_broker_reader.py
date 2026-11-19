@@ -1,4 +1,5 @@
 from types import SimpleNamespace as Row
+from datetime import datetime, timezone
 
 import pytest
 
@@ -13,7 +14,8 @@ def session(monkeypatch, tmp_path):
     terminal = Row(path="terminal", data_path="data", connected=True)
     api = Row(ACCOUNT_TRADE_MODE_DEMO=0, account_info=lambda:account, terminal_info=lambda:terminal,
               positions_get=lambda:(), orders_get=lambda:(), history_deals_get=lambda start,end:(),
-              DEAL_TYPE_BUY=0, DEAL_TYPE_SELL=1)
+              history_orders_get=lambda start,end:(), DEAL_TYPE_BUY=0, DEAL_TYPE_SELL=1,
+              DEAL_ENTRY_OUT=1)
     monkeypatch.setattr(reader, "mt5", api)
     pin = tmp_path / "pin"
     create_local_binding(api, pin)
@@ -85,3 +87,38 @@ def test_restarted_reader_invalidates_same_day(session, tmp_path):
     assert journal.db.execute("SELECT status FROM risk_samples ORDER BY id").fetchall() == [
         ("INCOMPLETE",), ("INVALIDATED",)]
     journal.close()
+
+
+def test_history_reconciliation_reports_partial_fill_from_linked_deals(session):
+    adapter, api = session
+    api.history_orders_get = lambda start,end: (Row(ticket=11, symbol="EURUSD", type=0,
+        volume_initial=.02, time_setup_msc=1000),)
+    api.history_deals_get = lambda start,end: (Row(ticket=12, order=11, position_id=13,
+        symbol="EURUSD", type=0, volume=.01, time_msc=1100, entry=0),)
+    result = adapter.reconcile_order(order_ticket=11, symbol="EURUSD", side=0,
+        requested_volume=.02, since_utc=datetime(2026,1,1,tzinfo=timezone.utc))
+    assert result.status == "PARTIAL"
+    assert result.deal_tickets == (12,)
+
+
+def test_empty_position_cannot_prove_closure_without_closing_deal(session):
+    adapter, api = session
+    api.history_orders_get = lambda start,end: (Row(ticket=11, symbol="EURUSD", type=0,
+        volume_initial=.01, time_setup_msc=1000),)
+    api.history_deals_get = lambda start,end: (Row(ticket=12, order=11, position_id=13,
+        symbol="EURUSD", type=0, volume=.01, time_msc=1100, entry=0),)
+    with pytest.raises(IntentBlocked, match="Closure"):
+        adapter.reconcile_order(order_ticket=11, symbol="EURUSD", side=0,
+            requested_volume=.01, since_utc=datetime(2026,1,1,tzinfo=timezone.utc))
+
+
+def test_closure_needs_matching_exit_volume(session):
+    adapter, api = session
+    api.history_orders_get = lambda start,end: (Row(ticket=11, symbol="EURUSD", type=0,
+        volume_initial=.01, time_setup_msc=1000),)
+    api.history_deals_get = lambda start,end: (
+        Row(ticket=12, order=11, position_id=13, symbol="EURUSD", type=0, volume=.01, time_msc=1100, entry=0),
+        Row(ticket=14, order=99, position_id=13, symbol="EURUSD", type=1, volume=.01, time_msc=1200, entry=1),)
+    result = adapter.reconcile_order(order_ticket=11, symbol="EURUSD", side=0,
+        requested_volume=.01, since_utc=datetime(2026,1,1,tzinfo=timezone.utc))
+    assert result.status == "CLOSED"
