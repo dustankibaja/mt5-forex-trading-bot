@@ -1,5 +1,5 @@
 from types import SimpleNamespace as Row
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -122,3 +122,28 @@ def test_closure_needs_matching_exit_volume(session):
     result = adapter.reconcile_order(order_ticket=11, symbol="EURUSD", side=0,
         requested_volume=.01, since_utc=datetime(2026,1,1,tzinfo=timezone.utc))
     assert result.status == "CLOSED"
+
+
+def test_open_reconciliation_captures_broker_protective_state(session):
+    adapter, api = session
+    api.history_orders_get = lambda start,end: (Row(ticket=11, symbol="EURUSD", type=0,
+        volume_initial=.01, time_setup_msc=1000),)
+    api.history_deals_get = lambda start,end: (Row(ticket=12, order=11, position_id=13,
+        symbol="EURUSD", type=0, volume=.01, time_msc=1100, entry=0),)
+    api.positions_get = lambda: (Row(ticket=13, symbol="EURUSD", type=0, volume=.01,
+                                     sl=1.05, tp=1.15),)
+    result = adapter.reconcile_order(order_ticket=11, symbol="EURUSD", side=0,
+        requested_volume=.01, since_utc=datetime(2026,1,1,tzinfo=timezone.utc))
+    assert result.status == "OPEN"
+    assert result.position_protection == ((13, 1.05, 1.15),)
+
+
+def test_invalid_protective_state_or_non_utc_start_blocks(session):
+    adapter, api = session
+    api.positions_get = lambda: (Row(ticket=13, symbol="EURUSD", type=0, volume=.01,
+                                     sl=float("nan"), tp=0.0),)
+    with pytest.raises(IntentBlocked, match="exposure"):
+        adapter.observe()
+    with pytest.raises(IntentBlocked, match="explicitly UTC"):
+        adapter.reconcile_order(order_ticket=11, symbol="EURUSD", side=0, requested_volume=.01,
+            since_utc=datetime(2026,1,1,tzinfo=timezone(timedelta(hours=3))))

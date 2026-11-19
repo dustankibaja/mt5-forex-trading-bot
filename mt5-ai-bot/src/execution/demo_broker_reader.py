@@ -1,6 +1,6 @@
 """Internal observations from an already attached MT5 session. No login or trading."""
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 from pathlib import Path
 import time
@@ -19,6 +19,8 @@ class Exposure:
     trade_type: int
     volume: float
     state: int | None
+    stop_loss: float
+    take_profit: float
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ class Reconciliation:
     status: str
     raw_order_time_msc: int
     raw_deal_time_msc: tuple[int, ...]
+    position_protection: tuple[tuple[int, float, float], ...]
 
 
 def _exposure(rows, *, pending=False):
@@ -55,14 +58,18 @@ def _exposure(rows, *, pending=False):
         kind = getattr(row, "type", None)
         volume = getattr(row, "volume_current" if pending else "volume", None)
         state = getattr(row, "state", None) if pending else None
+        stop_loss = getattr(row, "sl", 0.0)
+        take_profit = getattr(row, "tp", 0.0)
         if (type(ticket) is not int or ticket <= 0 or ticket in records
                 or not isinstance(symbol, str) or not symbol.strip()
                 or type(kind) is not int or kind not in (range(2, 8) if pending else (0, 1))
                 or type(volume) not in (float, int) or not math.isfinite(volume) or volume <= 0
+                or type(stop_loss) not in (float, int) or not math.isfinite(stop_loss) or stop_loss < 0
+                or type(take_profit) not in (float, int) or not math.isfinite(take_profit) or take_profit < 0
                 or pending and (type(state) is not int or state not in
                                 (mt5.ORDER_STATE_PLACED, mt5.ORDER_STATE_PARTIAL))):
             raise IntentBlocked("Incomplete or ambiguous broker exposure")
-        records[ticket] = Exposure(ticket, symbol, kind, volume, state)
+        records[ticket] = Exposure(ticket, symbol, kind, volume, state, float(stop_loss), float(take_profit))
     return tuple(records[key] for key in sorted(records))
 
 
@@ -176,8 +183,8 @@ class PinnedBrokerReader:
             raise IntentBlocked("Invalid reconciliation identifier")
         if not isinstance(symbol, str) or not symbol or not math.isfinite(requested_volume) or requested_volume <= 0:
             raise IntentBlocked("Invalid reconciliation expectation")
-        if since_utc.tzinfo is None:
-            raise IntentBlocked("Reconciliation start must be UTC-aware")
+        if since_utc.tzinfo is None or since_utc.utcoffset() != timedelta(0):
+            raise IntentBlocked("Reconciliation start must be explicitly UTC")
         start = time.monotonic_ns()
         binding = self._identity()
         received = datetime.now(timezone.utc)
@@ -205,7 +212,8 @@ class PinnedBrokerReader:
         if not math.isfinite(filled) or filled < 0 or filled > requested_volume + 1e-9:
             raise IntentBlocked("Broker filled volume is inconsistent")
         positions = _exposure(mt5.positions_get())
-        position_volume = sum(row.volume for row in positions if row.symbol == symbol and row.trade_type == side)
+        matching_positions = tuple(row for row in positions if row.symbol == symbol and row.trade_type == side)
+        position_volume = sum(row.volume for row in matching_positions)
         if position_volume > filled + 1e-9:
             raise IntentBlocked("Current position exceeds authenticated filled volume")
         if binding != self._identity() or time.monotonic_ns() - start > 2_000_000_000:
@@ -227,4 +235,6 @@ class PinnedBrokerReader:
             status = "CLOSED"
         return Reconciliation(binding, received, order_ticket,
                               tuple(sorted(row.ticket for row in linked)), filled, position_volume,
-                              status, raw_order_time, tuple(row.time_msc for row in linked))
+                              status, raw_order_time, tuple(row.time_msc for row in linked),
+                              tuple((row.ticket, row.stop_loss, row.take_profit)
+                                    for row in matching_positions))
