@@ -16,6 +16,7 @@ class MockSymbol:
         self.filling_mode = flags
         self.trade_exemode = execution
         self.trade_mode = trade_mode
+        self.order_mode = 3  # Market and limit capabilities returned by the terminal.
         self.visible = visible
         self.name = "EURUSD"
 
@@ -28,6 +29,13 @@ def test_allowed_fillings_from_symbol_flags():
 def test_no_return_policy_for_market_execution():
     assert allowed_fillings(MockSymbol(flags=2)) == [mt5.ORDER_FILLING_IOC]
     assert allowed_fillings(MockSymbol(flags=0)) == []
+
+
+def test_pending_order_requires_supported_pending_policy():
+    info = MockSymbol(flags=0)
+    assert allowed_fillings(info, operation="pending") == [mt5.ORDER_FILLING_RETURN]
+    info.order_mode = 1  # Market only.
+    assert allowed_fillings(info, operation="pending") == []
 
 
 def test_instant_execution_allows_fillings_independent_of_flags():

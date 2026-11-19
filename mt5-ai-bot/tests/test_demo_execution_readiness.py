@@ -9,6 +9,16 @@ class FakeMT5:
     SYMBOL_TRADE_MODE_FULL = 4
     ORDER_TYPE_BUY = 0
     ORDER_TYPE_SELL = 1
+    ORDER_FILLING_FOK = 0
+    ORDER_FILLING_IOC = 1
+    ORDER_FILLING_RETURN = 2
+    SYMBOL_FILLING_FOK = 1
+    SYMBOL_FILLING_IOC = 2
+    SYMBOL_ORDER_MARKET = 1
+    SYMBOL_ORDER_LIMIT = 2
+    SYMBOL_ORDER_STOP = 4
+    SYMBOL_ORDER_STOP_LIMIT = 8
+    SYMBOL_TRADE_EXECUTION_MARKET = 2
 
     def __init__(self, *, mode=0, connected=True, balance=10000,
                  min_lot=0.01, spread=1.0, trade_allowed=True):
@@ -40,7 +50,8 @@ class FakeMT5:
                                digits=5, volume_min=self.min_lot,
                                volume_max=100.0, volume_step=0.01,
                                trade_stops_level=10, trade_freeze_level=0,
-                               trade_contract_size=100000.0, filling_mode=3)
+                               trade_contract_size=100000.0, filling_mode=3,
+                               trade_exemode=2, order_mode=3)
 
     def positions_get(self): return ()
     def orders_get(self): return ()
@@ -74,6 +85,8 @@ def test_healthy_demo_allows_mechanical_review_without_orders():
     visible = str(result.public_report())
     assert "111111111" not in visible
     assert "NEVER_EXPORT" not in visible
+    assert result.public_report()["account_identity"].startswith("DEMO-")
+    assert result.public_report()["filling_policies"] == ["Fill or Kill", "Immediate or Cancel"]
     assert result.public_report()["order_execution_enabled"] is False
     assert result.public_report()["existing_positions"] == 0
     assert result.public_report()["terminal_identity"]

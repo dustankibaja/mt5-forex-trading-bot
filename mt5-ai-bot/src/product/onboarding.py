@@ -4,10 +4,10 @@ This module never accepts brokerage credentials, switches accounts, or sends ord
 """
 from __future__ import annotations
 
-import hashlib
 import math
 import os
 from pathlib import Path
+import secrets
 import time
 from typing import Any, Iterable
 
@@ -119,10 +119,11 @@ def inspect_existing_demo(
             raw_server = getattr(account, "server", None)
             if login is not None and isinstance(raw_server, str) and raw_server.strip():
                 server = raw_server.strip()
-                masked = _masked_login(login)
-                identity = hashlib.sha256(
-                    f"{login}|{server}".encode("utf-8")
-                ).hexdigest()
+                # Public onboarding output uses an opaque local-session ID that
+                # is independent of the real account number. Durable account
+                # isolation is enforced by the separately salted local binding.
+                identity = secrets.token_hex(32)
+                masked = f"DEMO-{identity[:8].upper()}"
 
         account_verified = connected and is_demo and available and valid_quote and identity is not None
         blockers = [item["detail"] for item in checks if not item["passed"]]
