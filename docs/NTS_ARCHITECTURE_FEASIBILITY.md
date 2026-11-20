@@ -13,12 +13,14 @@ No architecture replacement is made by this document.
 | Provider | Public NTS evidence | NTS-KE / authenticated NTP | Independence | Host requirements / diagnostics | Limitation |
 | --- | --- | --- | --- | --- | --- |
 | Cloudflare | Official Time Services documentation says `time.cloudflare.com` supports NTS and names Chrony, NTPsec and ntpd-rs clients. | Standard RFC 8915: TLS NTS-KE followed by authenticated NTP extension fields. NTS-KE TCP/4460; NTP UDP/123. Validate the normal TLS service identity; do not pin an observed certificate without a key lifecycle plan. | Cloudflare-operated. | Approved outbound TCP/4460 and UDP/123; retain TLS/NTS transcripts and local monotonic timings. | Provider documentation does not turn the NTS handshake into proof of local clock accuracy. |
-| Netnod | Official configuration guide lists `nts.netnod.se` plus regional endpoints and describes the two protocol phases. | TLS NTS-KE followed by UDP timestamping; its guide distinguishes KE and timestamping server addresses and documents `chronyc`/`ntpq` diagnostics. | Netnod-operated, separate from Cloudflare and Meta. | Same outbound ports; record the negotiated endpoint/certificate, cookies only as protected transient material, and client delay/offset/dispersion diagnostics. | Its guide covers Linux clients and explicitly says Windows/Docker are not covered. |
+| Netnod | Official configuration guide lists `nts.netnod.se` plus regional endpoints and describes the two protocol phases. | TLS NTS-KE on TCP/4460; Netnod's documented authenticated NTP stage is UDP/4123, with the endpoint/port supplied by NTS-KE. Its guide documents `chronyc`/`ntpq` diagnostics. | Netnod-operated, separate from Cloudflare and Meta. | Permit TCP/4460 and UDP/4123 only for the approved Netnod endpoints; record negotiated endpoint/certificate, cookies only as protected transient material, and client delay/offset/dispersion diagnostics. | Its guide covers Linux clients and explicitly says Windows/Docker are not covered. |
 | Meta | Official Meta engineering announcement says `nts.meta.com` is live and implements RFC 8915. | NTS-authenticated packets; RFC 8915 standard ports/protocol expectations apply. | Meta-operated, separate from Cloudflare and Netnod. | Same outbound ports; approved host must independently test certificate validation and measurement output. | Recent service; no host reachability or operational SLO is claimed here. |
 
 RFC 8915 requires TLS 1.3 or later for NTS-KE, ALPN `ntske/1`, and uses TCP
 4460 for key establishment. It then uses NTS extension fields and authenticated
-NTP packets; it is not an Ed25519 signature over Emtifize JSON. Treat source
+NTP packets. The NTS-KE response can specify the timestamping endpoint and
+port, so UDP/123 is a common default, not a safe universal firewall rule; Netnod
+documents UDP/4123 specifically. NTS is not an Ed25519 signature over Emtifize JSON. Treat source
 families as independent only after governance, infrastructure, network-path and
 failure-correlation review by the host operator.
 
@@ -52,6 +54,18 @@ already authenticated NTS-KE/TLS and NTP extension fields. It requires:
 It returns a non-certifying candidate only. It does not invoke the custom
 Ed25519 path and cannot mint `UtcEvidence`; recorded fixtures cannot certify a
 quote or risk state.
+
+### Adapter-review concerns retained for a future approved implementation
+
+- Sequence continuity currently treats a source set as one epoch-level sample.
+  A production collector must additionally maintain source-specific sequence,
+  key/certificate-rotation, NTS-cookie/session, and restart continuity.
+- The adapter verifies monotonic integer ordering but does not prove that a
+  supplied receipt timestamp came from the approved host's actual monotonic
+  clock. That requires a reviewed host collector and durable raw transcript.
+- Each source interval is stated at its own receipt time. A production
+  estimator must project intervals to a common monotonic reference instant
+  using a bounded drift model before deciding overlap or disagreement.
 
 ## Option comparison
 
