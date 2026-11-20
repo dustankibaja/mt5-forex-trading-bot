@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from src.execution.durable_certification_evidence import (
-    DurableCertificationEvidence, RiskQualificationEvaluator,
+    AuditCheckpoint, DurableCertificationEvidence, RiskQualificationEvaluator,
     _verified_broker_history_evidence,
 )
 from src.execution.quote_time_certification import _verified_utc_evidence
@@ -91,3 +91,15 @@ def test_audit_verifier_rejects_missing_or_orphaned_pairs():
     database.execute("DROP TRIGGER certification_observations_no_delete")
     database.execute("DELETE FROM certification_observations")
     assert not ledger.verify_audit_chain()
+
+
+def test_exported_checkpoint_is_offline_data_and_detects_later_ledger_tampering():
+    database = sqlite3.connect(":memory:")
+    ledger = DurableCertificationEvidence(database)
+    ledger.append(binding="binding", utc=utc())
+    checkpoint = ledger.export_audit_checkpoint()
+    assert isinstance(checkpoint, AuditCheckpoint)
+    assert ledger.verifies_against_checkpoint(checkpoint)
+    database.execute("DROP TRIGGER certification_audit_no_update")
+    database.execute("UPDATE certification_audit SET record_hash='tampered' WHERE sequence=1")
+    assert not ledger.verifies_against_checkpoint(checkpoint)

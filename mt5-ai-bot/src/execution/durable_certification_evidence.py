@@ -42,6 +42,18 @@ class QualificationDecision:
     reason: str
 
 
+@dataclass(frozen=True)
+class AuditCheckpoint:
+    """A value suitable for retention by an independent checkpoint holder.
+
+    Creating this object does not assert that any external system retained it.
+    The caller must export it to an independently controlled destination.
+    """
+    sequence: int
+    record_hash: str
+    audit_recorded_utc: str
+
+
 class DurableCertificationEvidence:
     """Stores raw evidence once; no update or replacement operation exists."""
 
@@ -148,6 +160,27 @@ class DurableCertificationEvidence:
                 return False
             prior_hash = saved_hash
         return True
+
+    def export_audit_checkpoint(self) -> AuditCheckpoint | None:
+        """Return the current chain head only if the local ledger verifies.
+
+        A checkpoint is intentionally just data.  This module neither sends it
+        nor marks it externally retained, avoiding a false anchoring claim.
+        """
+        if not self.verify_audit_chain():
+            return None
+        row = self.db.execute("""SELECT sequence,record_hash,audit_recorded_utc
+                               FROM certification_audit ORDER BY sequence DESC LIMIT 1""").fetchone()
+        return AuditCheckpoint(*row) if row else None
+
+    def verifies_against_checkpoint(self, checkpoint: AuditCheckpoint | None) -> bool:
+        """Offline comparison used after a separately retained checkpoint returns."""
+        if not isinstance(checkpoint, AuditCheckpoint) or not self.verify_audit_chain():
+            return False
+        row = self.db.execute("""SELECT sequence,record_hash,audit_recorded_utc
+                               FROM certification_audit WHERE sequence=?""",
+                              (checkpoint.sequence,)).fetchone()
+        return row == (checkpoint.sequence, checkpoint.record_hash, checkpoint.audit_recorded_utc)
 
     def rows(self, binding: str):
         return self.db.execute("""SELECT binding,host_identity,authority,source_identity,

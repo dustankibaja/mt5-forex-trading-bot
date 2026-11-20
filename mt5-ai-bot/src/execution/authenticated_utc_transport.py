@@ -74,8 +74,9 @@ class ApprovedHostSignedUtcVerifier:
     rejected across an ordinary process restart.
     """
     def __init__(self, *, host_identity: str, authority_keys: dict[str, frozenset[str]],
-                 replay_db, verify_detached, max_network_delay_ns: int = 2_000_000_000):
-        if (not host_identity or not authority_keys or not callable(verify_detached)
+                 replay_db, verify_detached=None, authority_keyring=None,
+                 max_network_delay_ns: int = 2_000_000_000):
+        if (not host_identity or not authority_keys or (not callable(verify_detached) and authority_keyring is None)
                 or max_network_delay_ns <= 0):
             raise ValueError("approved host signature-verifier configuration is required")
         self._host_identity = host_identity
@@ -84,6 +85,7 @@ class ApprovedHostSignedUtcVerifier:
             raise ValueError("every authority requires pinned key fingerprints")
         self._db = replay_db
         self._verify_detached = verify_detached
+        self._authority_keyring = authority_keyring
         self._max_network_delay_ns = max_network_delay_ns
         self._db.execute("""CREATE TABLE IF NOT EXISTS issued_utc_challenges(
             challenge_digest TEXT PRIMARY KEY, authority_id TEXT NOT NULL,
@@ -131,7 +133,12 @@ class ApprovedHostSignedUtcVerifier:
                 or assertion.uncertainty_seconds < 0):
             return None
         payload = assertion.canonical_payload()
-        if not self._verify_detached(assertion.key_fingerprint, payload, assertion.signature):
+        if self._authority_keyring is not None:
+            valid_signature = self._authority_keyring.verify(
+                assertion.authority_id, assertion.key_fingerprint, payload, assertion.signature)
+        else:
+            valid_signature = self._verify_detached(assertion.key_fingerprint, payload, assertion.signature)
+        if not valid_signature:
             return None
         challenge_digest = hashlib.sha256(assertion.challenge.encode("utf-8")).hexdigest()
         try:
