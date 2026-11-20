@@ -68,6 +68,11 @@ def _verified_broker_timestamp_semantics(*, provider: str, kind: str,
                                     source_identity, _SEMANTICS_ISSUER)
 
 
+def _is_verified_utc_evidence(value: object) -> bool:
+    """Internal boundary check used by read-only evidence consumers."""
+    return isinstance(value, UtcEvidence) and value._issuer is _UTC_ISSUER
+
+
 @dataclass(frozen=True)
 class QuoteCertification:
     state: QuoteTimeState

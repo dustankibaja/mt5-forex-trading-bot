@@ -10,6 +10,7 @@ import MetaTrader5 as mt5
 
 from src.execution.demo_account_binding import verify_local_binding
 from src.execution.demo_intent_journal import IntentBlocked
+from src.execution.quote_time_certification import UtcEvidence, _is_verified_utc_evidence
 
 
 @dataclass(frozen=True)
@@ -112,17 +113,38 @@ class PinnedBrokerReader:
         return AccountObservation(identity, datetime.now(timezone.utc), end, account.equity,
                                   account.balance, positions, orders)
 
-    def record_equity(self, journal):
-        """Serialize capture with ledger updates. Baselines start at first observation."""
+    def record_equity(self, journal, *, utc_evidence: UtcEvidence | None = None):
+        """Serialize capture using controlled UTC evidence when available.
+
+        A missing or expired attestation deliberately leaves the daily baseline
+        incomplete.  It must never be replaced by the host wall clock.
+        """
         db = journal.db
         db.execute("BEGIN IMMEDIATE")
         try:
             observation = self.observe()
+            trusted_utc = (
+                _is_verified_utc_evidence(utc_evidence)
+                and utc_evidence.account_binding == observation.binding
+                and time.monotonic_ns() <= utc_evidence.expires_monotonic_ns
+            )
+            if trusted_utc:
+                observation = AccountObservation(
+                    observation.binding,
+                    datetime.fromtimestamp(utc_evidence.utc_seconds, timezone.utc),
+                    observation.monotonic_ns,
+                    observation.equity,
+                    observation.balance,
+                    observation.positions,
+                    observation.pending,
+                )
             # A broker balance operation can be a deposit, withdrawal or reset.
             # Never infer opening equity from the first post-operation sample.
             day_start = observation.received.replace(hour=0, minute=0, second=0, microsecond=0)
             history = mt5.history_deals_get(day_start, observation.received)
-            reason = "Opening equity and continuous drawdown history unverified"
+            reason = ("Opening equity and continuous drawdown history unverified"
+                      if trusted_utc else
+                      "Independently certified UTC evidence unavailable; opening equity and continuous drawdown history unverified")
             if history is None:
                 reason = "Broker deal history unavailable"
             elif any(getattr(row, "type", None) not in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL)

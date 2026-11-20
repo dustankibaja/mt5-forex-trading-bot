@@ -6,6 +6,7 @@ import pytest
 from src.execution import demo_broker_reader as reader
 from src.execution.demo_account_binding import create_local_binding, AccountBindingError
 from src.execution.demo_intent_journal import DemoIntentJournal, IntentBlocked
+from src.execution.quote_time_certification import _verified_utc_evidence
 
 
 @pytest.fixture
@@ -86,6 +87,30 @@ def test_restarted_reader_invalidates_same_day(session, tmp_path):
     reader.PinnedBrokerReader(adapter.binding_path).record_equity(journal)
     assert journal.db.execute("SELECT status FROM risk_samples ORDER BY id").fetchall() == [
         ("INCOMPLETE",), ("INVALIDATED",)]
+    journal.close()
+
+
+def test_risk_recording_requires_controlled_utc_evidence(session, tmp_path, monkeypatch):
+    adapter, _ = session
+    journal = DemoIntentJournal(tmp_path / "ledger")
+    adapter.record_equity(journal)
+    assert "certified UTC" in journal.db.execute("SELECT reason FROM risk_coverage").fetchone()[0]
+    journal.close()
+
+
+def test_controlled_utc_evidence_is_bound_to_the_verified_account(session, tmp_path, monkeypatch):
+    adapter, _ = session
+    journal = DemoIntentJournal(tmp_path / "ledger")
+    now = 10_000
+    monkeypatch.setattr(reader.time, "monotonic_ns", lambda: now)
+    evidence = _verified_utc_evidence(
+        source="fixture-authority", utc_seconds=1_000., uncertainty_seconds=.05,
+        monotonic_ns=now, expires_monotonic_ns=now + 1_000,
+        account_binding="wrong-binding", source_identity="fixture-source",
+        sync_epoch="fixture-epoch", observation_sequence=1,
+    )
+    adapter.record_equity(journal, utc_evidence=evidence)
+    assert "certified UTC" in journal.db.execute("SELECT reason FROM risk_coverage").fetchone()[0]
     journal.close()
 
 
