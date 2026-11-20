@@ -15,6 +15,7 @@ from src.execution.utc_evidence_collector import (
     _verified_independent_utc_measurement,
 )
 from src.research.calibrated_clock import Calibration, CalibrationError
+from src.execution.authenticated_utc_transport import VerifiedUtcTranscript, _is_verified_transcript
 
 
 _AUTHENTICATED_REFERENCE_ISSUER = object()
@@ -41,6 +42,31 @@ def _authenticated_reference_set(*, authority_id: str, host_identity: str,
         authority_id, host_identity, source_fingerprints,
         synchronization_epoch, calibration, _AUTHENTICATED_REFERENCE_ISSUER,
     )
+
+
+def reference_set_from_verified_transcripts(*, host_identity: str,
+                                            synchronization_epoch: str,
+                                            calibration: Calibration,
+                                            transcripts: tuple[VerifiedUtcTranscript, ...]
+                                            ) -> AuthenticatedReferenceSet | None:
+    """Build a reference set only from distinct signed-source families.
+
+    The private fixture factory remains for isolated tests; production callers
+    must use this entry point after host-side signature verification.
+    """
+    if (len(transcripts) < 2 or not synchronization_epoch
+            or any(not _is_verified_transcript(item) for item in transcripts)):
+        return None
+    raw = tuple(item.transcript for item in transcripts)
+    if (any(item.host_identity != host_identity or item.synchronization_epoch != synchronization_epoch
+            for item in raw) or len({item.source_family for item in raw}) < 2):
+        return None
+    authority_id = "signed-set:" + "|".join(sorted({item.authority_id for item in raw}))
+    fingerprints = tuple(sorted(item.transcript_digest for item in transcripts))
+    return _authenticated_reference_set(authority_id=authority_id, host_identity=host_identity,
+                                        source_fingerprints=fingerprints,
+                                        synchronization_epoch=synchronization_epoch,
+                                        calibration=calibration)
 
 
 class ApprovedHostUtcAuthorityAdapter:
