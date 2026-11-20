@@ -114,6 +114,58 @@ def test_controlled_utc_evidence_is_bound_to_the_verified_account(session, tmp_p
     journal.close()
 
 
+def test_expired_utc_evidence_leaves_risk_record_incomplete(session, tmp_path, monkeypatch):
+    adapter, _ = session
+    journal = DemoIntentJournal(tmp_path / "ledger")
+    now = 10_000
+    monkeypatch.setattr(reader.time, "monotonic_ns", lambda: now)
+    evidence = _verified_utc_evidence(
+        source="fixture-authority", utc_seconds=1_000., uncertainty_seconds=.05,
+        monotonic_ns=now - 2, expires_monotonic_ns=now - 1,
+        account_binding=adapter._identity(), source_identity="fixture-source",
+        sync_epoch="fixture-epoch", observation_sequence=1,
+    )
+    adapter.record_equity(journal, utc_evidence=evidence)
+    assert journal.db.execute("SELECT status FROM risk_samples").fetchone() == ("INCOMPLETE",)
+    journal.close()
+
+
+def _observation(binding="binding", received=None, monotonic=2_000_000_000):
+    return reader.AccountObservation(
+        binding, received or datetime(2026, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+        monotonic, 10_000., 10_000., (), (),
+    )
+
+
+def _prior(status="INCOMPLETE", reason="baseline incomplete"):
+    return ("binding", "2026-01-01", "session", "2026-01-01T00:00:00+00:00",
+            1_000_000_000, status, reason)
+
+
+def test_two_same_day_samples_without_utc_never_promote_to_observing():
+    first_status, _ = reader._next_risk_status(_prior(), _observation(), "session", False, "unused")
+    second_prior = _prior(status=first_status)
+    second_status, _ = reader._next_risk_status(second_prior, _observation(monotonic=3_000_000_000),
+                                                 "session", False, "unused")
+    assert (first_status, second_status) == ("INCOMPLETE", "INCOMPLETE")
+
+
+def test_trusted_observation_followed_by_missing_utc_invalidates_continuity():
+    status, _ = reader._next_risk_status(_prior(status="OBSERVING"), _observation(), "session", False, "unused")
+    assert status == "INVALIDATED"
+
+
+def test_valid_account_bound_utc_continuity_can_only_observe_not_qualify():
+    status, _ = reader._next_risk_status(_prior(), _observation(), "session", True, "baseline incomplete")
+    assert status == "OBSERVING"
+
+
+def test_existing_invalidation_is_preserved_even_with_trusted_utc():
+    status, reason = reader._next_risk_status(_prior(status="INVALIDATED", reason="history missing"),
+                                               _observation(), "session", True, "unused")
+    assert (status, reason) == ("INVALIDATED", "history missing")
+
+
 def test_history_reconciliation_reports_partial_fill_from_linked_deals(session):
     adapter, api = session
     api.history_orders_get = lambda start,end: (Row(ticket=11, symbol="EURUSD", type=0,

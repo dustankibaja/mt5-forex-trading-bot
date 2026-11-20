@@ -80,6 +80,27 @@ def _exposure(rows, *, pending=False):
     return tuple(records[key] for key in sorted(records))
 
 
+def _next_risk_status(prior, observation, session: str, trusted_utc: bool, reason: str):
+    """Return a fail-closed risk transition; QUALIFIED is intentionally absent."""
+    status = "INCOMPLETE"
+    if prior and prior[0] != observation.binding:
+        return "INVALIDATED", "Pinned identity changed"
+    if not prior or prior[1] != observation.received.date().isoformat():
+        return status, reason
+    if prior[5] == "INVALIDATED":
+        return prior[5], prior[6]
+    if not trusted_utc:
+        if prior[5] == "OBSERVING":
+            return "INVALIDATED", "UTC evidence continuity lost"
+        return "INCOMPLETE", "Independently certified UTC evidence unavailable"
+    elapsed = (observation.received - datetime.fromisoformat(prior[3])).total_seconds()
+    monotonic_elapsed = (observation.monotonic_ns - prior[4]) / 1e9
+    if (prior[2] != session or not 0 < elapsed <= 2
+            or not 0 < monotonic_elapsed <= 2 or abs(monotonic_elapsed - elapsed) > .25):
+        return "INVALIDATED", "Observation continuity lost"
+    return "OBSERVING", reason
+
+
 class PinnedBrokerReader:
     def __init__(self, binding_path: Path):
         self.binding_path = binding_path
@@ -166,19 +187,9 @@ class PinnedBrokerReader:
             day = day_start.date().isoformat()
             prior = db.execute("""SELECT binding,day,session,received,mono,status,reason
                                   FROM risk_samples ORDER BY id DESC LIMIT 1""").fetchone()
-            status = "INCOMPLETE"
-            if prior and prior[0] != observation.binding:
-                status, reason = "INVALIDATED", "Pinned identity changed"
-            elif prior and prior[1] == day:
-                elapsed = (observation.received - datetime.fromisoformat(prior[3])).total_seconds()
-                monotonic_elapsed = (observation.monotonic_ns - prior[4]) / 1e9
-                if prior[5] == "INVALIDATED":
-                    status, reason = prior[5:]
-                elif (prior[2] != self._session or not 0 < elapsed <= 2
-                      or not 0 < monotonic_elapsed <= 2 or abs(monotonic_elapsed - elapsed) > .25):
-                    status, reason = "INVALIDATED", "Observation continuity lost"
-                else:
-                    status = "OBSERVING"
+            status, reason = _next_risk_status(
+                prior, observation, self._session, trusted_utc, reason,
+            )
             if history is None or history or observation.positions or observation.pending:
                 status = "INVALIDATED"
                 if observation.positions or observation.pending:

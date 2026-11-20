@@ -45,3 +45,18 @@ def test_invalid_uncertainty_invalidates_without_guessing():
     collector = ReadOnlyUtcEvidenceCollector("bound-demo")
     assert collector.accept(measurement(uncertainty_seconds=.5)) is None
     assert collector.invalidated
+
+
+def test_repeated_or_out_of_order_measurement_invalidates_continuity():
+    collector = ReadOnlyUtcEvidenceCollector("bound-demo")
+    assert collector.accept(measurement()) is not None
+    assert collector.accept(measurement()) is None
+    assert collector.invalidated
+
+
+def test_future_sequence_requires_strictly_new_monotonic_and_utc_values():
+    collector = ReadOnlyUtcEvidenceCollector("bound-demo")
+    assert collector.accept(measurement()) is not None
+    assert collector.accept(measurement(utc_seconds=999., measured_monotonic_ns=11,
+                                        expires_monotonic_ns=21)) is None
+    assert collector.invalidated

@@ -2,8 +2,10 @@
 
 This module deliberately has no network client and does not inspect or alter
 Windows Time.  A platform-specific authority may hand it a signed/verified
-measurement only after it has established an uncertainty bound.  Until then it
-returns no attestation, keeping quote certification fail-closed.
+measurement only after it has established an uncertainty bound.  The private
+factory below is a fixture/adapter boundary, not an independently verified
+authority by itself. Until a real adapter exists, this module returns no
+production evidence, keeping quote certification fail-closed.
 """
 from __future__ import annotations
 
@@ -53,6 +55,8 @@ class ReadOnlyUtcEvidenceCollector:
         self._max_uncertainty_seconds = max_uncertainty_seconds
         self._source_identity: str | None = None
         self._sync_epoch: str | None = None
+        self._last_monotonic_ns: int | None = None
+        self._last_utc_seconds: float | None = None
         self._sequence = 0
         self._invalidated = False
 
@@ -82,7 +86,14 @@ class ReadOnlyUtcEvidenceCollector:
               or measurement.synchronization_epoch != self._sync_epoch):
             self._invalidated = True
             return None
+        if (self._last_monotonic_ns is not None and
+                (measurement.measured_monotonic_ns <= self._last_monotonic_ns
+                 or measurement.utc_seconds <= self._last_utc_seconds)):
+            self._invalidated = True
+            return None
         self._sequence += 1
+        self._last_monotonic_ns = measurement.measured_monotonic_ns
+        self._last_utc_seconds = measurement.utc_seconds
         return _verified_utc_evidence(
             source=measurement.source,
             utc_seconds=measurement.utc_seconds,
