@@ -11,6 +11,7 @@ import MetaTrader5 as mt5
 from src.execution.demo_account_binding import verify_local_binding
 from src.execution.demo_intent_journal import IntentBlocked
 from src.execution.quote_time_certification import UtcEvidence, _is_verified_utc_evidence
+from src.execution.durable_certification_evidence import DurableCertificationEvidence
 
 
 @dataclass(frozen=True)
@@ -80,7 +81,8 @@ def _exposure(rows, *, pending=False):
     return tuple(records[key] for key in sorted(records))
 
 
-def _next_risk_status(prior, observation, session: str, trusted_utc: bool, reason: str):
+def _next_risk_status(prior, observation, session: str, trusted_utc: bool, reason: str,
+                      evidence_identity: tuple[str, str, str, int] | None = None):
     """Return a fail-closed risk transition; QUALIFIED is intentionally absent."""
     status = "INCOMPLETE"
     if prior and prior[0] != observation.binding:
@@ -91,10 +93,18 @@ def _next_risk_status(prior, observation, session: str, trusted_utc: bool, reaso
         return prior[5], prior[6]
     if prior[2] != session:
         return "INVALIDATED", "Observation continuity lost"
-    if not trusted_utc:
-        if prior[5] == "OBSERVING":
+    # Existing rows without provenance cannot seed a certified chain.
+    prior_identity = prior[7:11] if len(prior) >= 11 else (None, None, None, None)
+    if not trusted_utc or evidence_identity is None:
+        if prior[5] == "OBSERVING" or all(prior_identity):
             return "INVALIDATED", "UTC evidence continuity lost"
         return "INCOMPLETE", "Independently certified UTC evidence unavailable"
+    if not all(prior_identity):
+        return "INCOMPLETE", "A certified observation period must begin with a verified prior sample"
+    if prior_identity[:3] != evidence_identity[:3]:
+        return "INVALIDATED", "Certified evidence binding or synchronization changed"
+    if type(prior_identity[3]) is not int or prior_identity[3] + 1 != evidence_identity[3]:
+        return "INVALIDATED", "UTC evidence continuity lost"
     elapsed = (observation.received - datetime.fromisoformat(prior[3])).total_seconds()
     monotonic_elapsed = (observation.monotonic_ns - prior[4]) / 1e9
     if (not 0 < elapsed <= 2
@@ -149,9 +159,15 @@ class PinnedBrokerReader:
             trusted_utc = (
                 _is_verified_utc_evidence(utc_evidence)
                 and utc_evidence.account_binding == observation.binding
+                and all(isinstance(value, str) and value for value in
+                        (utc_evidence.host_identity, utc_evidence.source_identity,
+                         utc_evidence.sync_epoch))
                 and time.monotonic_ns() <= utc_evidence.expires_monotonic_ns
             )
+            evidence_identity = None
             if trusted_utc:
+                evidence_identity = (utc_evidence.host_identity, utc_evidence.source_identity,
+                                     utc_evidence.sync_epoch, utc_evidence.observation_sequence)
                 observation = AccountObservation(
                     observation.binding,
                     datetime.fromtimestamp(utc_evidence.utc_seconds, timezone.utc),
@@ -185,21 +201,34 @@ class PinnedBrokerReader:
             db.execute("""CREATE TABLE IF NOT EXISTS risk_samples(
                 id INTEGER PRIMARY KEY, binding TEXT NOT NULL, day TEXT NOT NULL,
                 session TEXT NOT NULL, received TEXT NOT NULL, mono INTEGER NOT NULL,
-                equity REAL NOT NULL, status TEXT NOT NULL, reason TEXT NOT NULL)""")
+                equity REAL NOT NULL, status TEXT NOT NULL, reason TEXT NOT NULL,
+                host_identity TEXT, source_identity TEXT, synchronization_epoch TEXT,
+                utc_sequence INTEGER)""")
+            existing = {row[1] for row in db.execute("PRAGMA table_info(risk_samples)")}
+            for column, kind in (("host_identity", "TEXT"), ("source_identity", "TEXT"),
+                                 ("synchronization_epoch", "TEXT"), ("utc_sequence", "INTEGER")):
+                if column not in existing:
+                    db.execute(f"ALTER TABLE risk_samples ADD COLUMN {column} {kind}")
             day = day_start.date().isoformat()
-            prior = db.execute("""SELECT binding,day,session,received,mono,status,reason
+            prior = db.execute("""SELECT binding,day,session,received,mono,status,reason,
+                                  host_identity,source_identity,synchronization_epoch,utc_sequence
                                   FROM risk_samples ORDER BY id DESC LIMIT 1""").fetchone()
             status, reason = _next_risk_status(
-                prior, observation, self._session, trusted_utc, reason,
+                prior, observation, self._session, trusted_utc, reason, evidence_identity,
             )
             if history is None or history or observation.positions or observation.pending:
                 status = "INVALIDATED"
                 if observation.positions or observation.pending:
                     reason = "Account exposure requires attributed broker history"
-            db.execute("""INSERT INTO risk_samples(binding,day,session,received,mono,equity,status,reason)
-                          VALUES(?,?,?,?,?,?,?,?)""",
+            db.execute("""INSERT INTO risk_samples(binding,day,session,received,mono,equity,status,reason,
+                          host_identity,source_identity,synchronization_epoch,utc_sequence)
+                          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                        (observation.binding, day, self._session, observation.received.isoformat(),
-                        observation.monotonic_ns, observation.equity, status, reason))
+                        observation.monotonic_ns, observation.equity, status, reason,
+                        *(evidence_identity or (None, None, None, None))))
+            if trusted_utc:
+                DurableCertificationEvidence(db).append(binding=observation.binding, utc=utc_evidence,
+                                                         invalidation_reason="" if status != "INVALIDATED" else reason)
             db.execute("""CREATE TABLE IF NOT EXISTS observed_equity(
                 binding TEXT NOT NULL, utc_day TEXT NOT NULL, first_utc TEXT NOT NULL,
                 first_equity REAL NOT NULL, peak_equity REAL NOT NULL,

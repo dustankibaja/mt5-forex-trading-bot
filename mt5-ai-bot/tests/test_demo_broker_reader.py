@@ -142,6 +142,10 @@ def _prior(status="INCOMPLETE", reason="baseline incomplete"):
             1_000_000_000, status, reason)
 
 
+def _verified_prior(status="INCOMPLETE", sequence=1, host="host", source="source", epoch="epoch"):
+    return _prior(status) + (host, source, epoch, sequence)
+
+
 def test_two_same_day_samples_without_utc_never_promote_to_observing():
     first_status, _ = reader._next_risk_status(_prior(), _observation(), "session", False, "unused")
     second_prior = _prior(status=first_status)
@@ -156,8 +160,28 @@ def test_trusted_observation_followed_by_missing_utc_invalidates_continuity():
 
 
 def test_valid_account_bound_utc_continuity_can_only_observe_not_qualify():
-    status, _ = reader._next_risk_status(_prior(), _observation(), "session", True, "baseline incomplete")
+    status, _ = reader._next_risk_status(
+        _verified_prior(), _observation(), "session", True, "baseline incomplete",
+        ("host", "source", "epoch", 2))
     assert status == "OBSERVING"
+
+
+def test_uncertified_prior_cannot_seed_a_certified_observing_chain():
+    status, _ = reader._next_risk_status(
+        _prior(), _observation(), "session", True, "baseline incomplete",
+        ("host", "source", "epoch", 1))
+    assert status == "INCOMPLETE"
+
+
+def test_host_epoch_or_sequence_change_breaks_certified_chain():
+    status, _ = reader._next_risk_status(
+        _verified_prior(), _observation(), "session", True, "baseline incomplete",
+        ("other-host", "source", "epoch", 2))
+    assert status == "INVALIDATED"
+    status, reason = reader._next_risk_status(
+        _verified_prior(sequence=1), _observation(), "session", True, "baseline incomplete",
+        ("host", "source", "epoch", 3))
+    assert (status, reason) == ("INVALIDATED", "UTC evidence continuity lost")
 
 
 def test_existing_invalidation_is_preserved_even_with_trusted_utc():
