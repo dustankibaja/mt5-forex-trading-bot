@@ -72,6 +72,9 @@ def test_hash_chain_detects_tampering_and_survives_reopen(tmp_path):
     database = sqlite3.connect(path)
     ledger = DurableCertificationEvidence(database)
     assert ledger.verify_audit_chain()
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        database.execute("UPDATE certification_observations SET bid=1.3 WHERE sequence=1")
+    assert ledger.verify_audit_chain()
 
 
 def test_audit_verifier_rejects_missing_or_orphaned_pairs():
@@ -88,6 +91,3 @@ def test_audit_verifier_rejects_missing_or_orphaned_pairs():
     database.execute("DROP TRIGGER certification_observations_no_delete")
     database.execute("DELETE FROM certification_observations")
     assert not ledger.verify_audit_chain()
-    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
-        database.execute("UPDATE certification_observations SET bid=1.3 WHERE sequence=1")
-    assert ledger.verify_audit_chain()
