@@ -139,13 +139,39 @@ def evaluate(strategy_raw: dict[str, Any], candles_raw: list[dict[str, Any]], *,
     return {"strategy_id": strategy["strategy_id"], "strategy_version": strategy["version"], "configuration_hash": strategy["configuration_hash"], "signal_candle": candles[index]["timestamp"], "evaluated_at": evaluated_at or candles[index]["timestamp"], "decision": decision, "session_passed": in_session, "long": long_details, "short": short_details, "source": candles[index]["source"], "price_basis": candles[index]["price_basis"], "execution_enabled": False}
 
 
+def explain_signal(strategy_raw: dict[str, Any], candles_raw: list[dict[str, Any]], *, evaluated_at: str | None = None) -> dict[str, Any]:
+    """Explain one completed-candle decision without creating an order intent."""
+    strategy = validate_strategy(strategy_raw)
+    candles = validate_candles(candles_raw, strategy["timeframe"])
+    base = {"strategy_id": strategy["strategy_id"], "strategy_version": strategy["version"], "configuration_hash": strategy["configuration_hash"], "signal_candle": candles[-1]["timestamp"], "timeframe": strategy["timeframe"], "source": candles[-1]["source"], "price_basis": candles[-1]["price_basis"], "execution_enabled": False}
+    try:
+        decision = evaluate(strategy, candles, evaluated_at=evaluated_at)
+    except CandleValidationError as error:
+        if "warm-up" not in str(error):
+            raise
+        return {**base, "decision": "neutral", "display_decision": "NO SIGNAL", "reason_code": "INDICATOR_WARM_UP", "explanation": "No signal: the completed candle does not have sufficient prior data to warm up every configured indicator.", "warmup_required": True}
+    if not decision["session_passed"]:
+        reason_code = "OUTSIDE_SESSION"
+        explanation = "No signal: the completed candle is outside the configured strategy session."
+    elif decision["decision"] == "long":
+        reason_code = "BUY_CONDITION_PASSED"
+        explanation = "BUY signal: the configured BUY condition passed and the SELL condition did not pass on this completed candle."
+    elif decision["decision"] == "short":
+        reason_code = "SELL_CONDITION_PASSED"
+        explanation = "SELL signal: the configured SELL condition passed and the BUY condition did not pass on this completed candle."
+    elif decision["long"]["passed"] and decision["short"]["passed"]:
+        reason_code = "AMBIGUOUS_CONDITIONS"
+        explanation = "No signal: both configured directions passed, so the decision is intentionally ambiguous."
+    else:
+        reason_code = "ENTRY_CONDITIONS_NOT_MET"
+        explanation = "No signal: neither configured entry condition passed on this completed candle."
+    return {**decision, "timeframe": strategy["timeframe"], "display_decision": {"long": "BUY", "short": "SELL", "neutral": "NO SIGNAL"}[decision["decision"]], "reason_code": reason_code, "explanation": explanation, "warmup_required": False}
+
+
 def preview(strategy: dict[str, Any], candles: list[dict[str, Any]]) -> dict[str, Any]:
     checked_strategy = validate_strategy(strategy)
     validated = validate_candles(candles, checked_strategy["timeframe"])
-    decisions, rejected = [], 0
-    for end in range(2, len(validated) + 1):
-        try: decisions.append(evaluate(checked_strategy, validated[:end]))
-        except CandleValidationError as error:
-            if "warm-up" in str(error): rejected += 1
-            else: raise
-    return {"evaluated_candle_count": len(decisions), "warmup_rejected_count": rejected, "buy_signal_count": sum(d["decision"] == "long" for d in decisions), "sell_signal_count": sum(d["decision"] == "short" for d in decisions), "neutral_count": sum(d["decision"] == "neutral" for d in decisions), "signals": [{"timestamp": d["signal_candle"], "decision": d["decision"], "long_passed": d["long"]["passed"], "short_passed": d["short"]["passed"]} for d in decisions], "profitability_included": False, "execution_enabled": False}
+    explanations = [explain_signal(checked_strategy, validated[:end]) for end in range(2, len(validated) + 1)]
+    decisions = [item for item in explanations if not item["warmup_required"]]
+    rejected = len(explanations) - len(decisions)
+    return {"evaluated_candle_count": len(decisions), "warmup_rejected_count": rejected, "buy_signal_count": sum(d["decision"] == "long" for d in decisions), "sell_signal_count": sum(d["decision"] == "short" for d in decisions), "neutral_count": sum(d["decision"] == "neutral" for d in decisions), "signals": [{"timestamp": d["signal_candle"], "decision": d["decision"], "display_decision": d["display_decision"], "reason_code": d["reason_code"], "explanation": d["explanation"], "source": d["source"], "price_basis": d["price_basis"], "long_passed": d.get("long", {}).get("passed"), "short_passed": d.get("short", {}).get("passed")} for d in explanations], "profitability_included": False, "execution_enabled": False}

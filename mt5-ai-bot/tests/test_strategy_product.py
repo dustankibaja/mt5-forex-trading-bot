@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.product.strategy_evaluator import CandleValidationError, evaluate, preview
+from src.product.strategy_evaluator import CandleValidationError, evaluate, explain_signal, preview
 from src.product.strategy_spec import StrategyValidationError, explain_strategy, validate_strategy
 
 
@@ -93,3 +93,14 @@ def test_signal_preview_is_not_profitability_backtest():
     assert result["buy_signal_count"] >= 1
     assert result["profitability_included"] is False
     assert result["execution_enabled"] is False
+
+
+def test_signal_explanation_preserves_completed_candle_details_and_warmup_reason():
+    explanation = explain_signal(strategy(), candles([4, 3, 2, 1, 2, 4]))
+    assert explanation["display_decision"] == "BUY"
+    assert explanation["timeframe"] == "H1" and explanation["source"] == "controlled-fixture"
+    assert explanation["execution_enabled"] is False and explanation["warmup_required"] is False
+    warmup = explain_signal(strategy(), candles([1, 2, 3]))
+    assert warmup["display_decision"] == "NO SIGNAL"
+    assert warmup["reason_code"] == "INDICATOR_WARM_UP"
+    assert warmup["warmup_required"] is True
