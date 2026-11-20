@@ -14,7 +14,7 @@ from src.execution.utc_evidence_collector import (
     IndependentUtcMeasurement,
     _verified_independent_utc_measurement,
 )
-from src.research.calibrated_clock import Calibration, CalibrationError
+from src.research.calibrated_clock import Calibration, CalibrationError, ReferenceObservation, calibrate
 from src.execution.authenticated_utc_transport import VerifiedUtcTranscript, _is_verified_transcript
 
 
@@ -28,6 +28,7 @@ class AuthenticatedReferenceSet:
     authority_id: str
     host_identity: str
     source_fingerprints: tuple[str, ...]
+    transcript_digests: tuple[str, ...]
     synchronization_epoch: str
     calibration: Calibration
     _issuer: object | None = field(default=None, repr=False, compare=False)
@@ -35,19 +36,21 @@ class AuthenticatedReferenceSet:
 
 def _authenticated_reference_set(*, authority_id: str, host_identity: str,
                                  source_fingerprints: tuple[str, ...],
+                                 transcript_digests: tuple[str, ...] = (),
                                  synchronization_epoch: str,
                                  calibration: Calibration) -> AuthenticatedReferenceSet:
     """Private factory reserved for a separately reviewed host transport verifier."""
     return AuthenticatedReferenceSet(
-        authority_id, host_identity, source_fingerprints,
+        authority_id, host_identity, source_fingerprints, transcript_digests,
         synchronization_epoch, calibration, _AUTHENTICATED_REFERENCE_ISSUER,
     )
 
 
 def reference_set_from_verified_transcripts(*, host_identity: str,
                                             synchronization_epoch: str,
-                                            calibration: Calibration,
-                                            transcripts: tuple[VerifiedUtcTranscript, ...]
+                                            transcripts: tuple[VerifiedUtcTranscript, ...],
+                                            maximum_age_ms: float,
+                                            drift_bound_ppm: float,
                                             ) -> AuthenticatedReferenceSet | None:
     """Build a reference set only from distinct signed-source families.
 
@@ -57,14 +60,28 @@ def reference_set_from_verified_transcripts(*, host_identity: str,
     if (len(transcripts) < 2 or not synchronization_epoch
             or any(not _is_verified_transcript(item) for item in transcripts)):
         return None
-    raw = tuple(item.transcript for item in transcripts)
-    if (any(item.host_identity != host_identity or item.synchronization_epoch != synchronization_epoch
-            for item in raw) or len({item.source_family for item in raw}) < 2):
+    raw = tuple(item.receipt for item in transcripts)
+    assertions = tuple(item.assertion for item in raw)
+    if (any(receipt.host_identity != host_identity or assertion.synchronization_epoch != synchronization_epoch
+            for receipt, assertion in zip(raw, assertions))
+            or len({item.source_family for item in assertions}) < 2):
         return None
-    authority_id = "signed-set:" + "|".join(sorted({item.authority_id for item in raw}))
-    fingerprints = tuple(sorted(item.transcript_digest for item in transcripts))
+    try:
+        calibration = calibrate([
+            ReferenceObservation(assertion.authority_id, assertion.source_family,
+                                 receipt.received_monotonic_ns / 1_000_000,
+                                 assertion.utc_seconds * 1000, 0.0,
+                                 (receipt.received_monotonic_ns - receipt.sent_monotonic_ns) / 1_000_000,
+                                 assertion.uncertainty_seconds * 1000)
+            for receipt, assertion in zip(raw, assertions)], maximum_age_ms=maximum_age_ms,
+            drift_bound_ppm=drift_bound_ppm)
+    except CalibrationError:
+        return None
+    authority_id = "signed-set:" + "|".join(sorted({item.authority_id for item in assertions}))
+    fingerprints = tuple(sorted(f"{item.authority_id}:{item.key_fingerprint}" for item in assertions))
     return _authenticated_reference_set(authority_id=authority_id, host_identity=host_identity,
                                         source_fingerprints=fingerprints,
+                                        transcript_digests=tuple(sorted(item.transcript_digest for item in transcripts)),
                                         synchronization_epoch=synchronization_epoch,
                                         calibration=calibration)
 

@@ -46,11 +46,10 @@ def test_ledger_rejects_untrusted_or_inconsistent_raw_evidence():
 def test_evaluator_explains_history_and_continuity_failures():
     ledger = DurableCertificationEvidence(sqlite3.connect(":memory:"))
     ledger.append(binding="binding", utc=utc())
-    rows = ledger.rows("binding")
     evaluator = RiskQualificationEvaluator()
-    assert evaluator.evaluate(binding="binding", rows=rows, history=None).status == "INCOMPLETE"
-    assert evaluator.evaluate(binding="binding", rows=rows, history=history(), audit_valid=ledger.verify_audit_chain()).status == "OBSERVING"
-    assert evaluator.evaluate(binding="binding", rows=rows, history=history(no_cash_movements=False), audit_valid=True).status == "INCOMPLETE"
+    assert evaluator.evaluate(binding="binding", ledger=ledger, history=None).status == "INCOMPLETE"
+    assert evaluator.evaluate(binding="binding", ledger=ledger, history=history()).status == "OBSERVING"
+    assert evaluator.evaluate(binding="binding", ledger=ledger, history=history(no_cash_movements=False)).status == "INCOMPLETE"
 
 
 def test_evaluator_never_qualifies_incomplete_or_interrupted_evidence():
@@ -58,7 +57,7 @@ def test_evaluator_never_qualifies_incomplete_or_interrupted_evidence():
     ledger.append(binding="binding", utc=utc(1, 86_399., 10, 20))
     ledger.append(binding="binding", utc=utc(3, 86_401., 11, 21))
     decision = RiskQualificationEvaluator().evaluate(
-        binding="binding", rows=ledger.rows("binding"), history=history(), audit_valid=ledger.verify_audit_chain())
+        binding="binding", ledger=ledger, history=history())
     assert decision.status == "INCOMPLETE"
     assert "interrupted" in decision.reason
 
@@ -73,6 +72,22 @@ def test_hash_chain_detects_tampering_and_survives_reopen(tmp_path):
     database = sqlite3.connect(path)
     ledger = DurableCertificationEvidence(database)
     assert ledger.verify_audit_chain()
+
+
+def test_audit_verifier_rejects_missing_or_orphaned_pairs():
+    database = sqlite3.connect(":memory:")
+    ledger = DurableCertificationEvidence(database)
+    ledger.append(binding="binding", utc=utc())
+    database.execute("DROP TRIGGER certification_audit_no_delete")
+    database.execute("DELETE FROM certification_audit")
+    assert not ledger.verify_audit_chain()
+
+    database = sqlite3.connect(":memory:")
+    ledger = DurableCertificationEvidence(database)
+    ledger.append(binding="binding", utc=utc())
+    database.execute("DROP TRIGGER certification_observations_no_delete")
+    database.execute("DELETE FROM certification_observations")
+    assert not ledger.verify_audit_chain()
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         database.execute("UPDATE certification_observations SET bid=1.3 WHERE sequence=1")
     assert ledger.verify_audit_chain()

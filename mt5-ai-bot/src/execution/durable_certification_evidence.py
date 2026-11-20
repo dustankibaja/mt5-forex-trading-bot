@@ -62,6 +62,7 @@ class DurableCertificationEvidence:
             prior_hash TEXT NOT NULL, record_hash TEXT NOT NULL UNIQUE,
             audit_recorded_utc TEXT NOT NULL,
             FOREIGN KEY(observation_sequence) REFERENCES certification_observations(sequence))""")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS certification_audit_observation_once ON certification_audit(observation_sequence)")
         db.execute("""CREATE TRIGGER IF NOT EXISTS certification_observations_no_update
             BEFORE UPDATE ON certification_observations BEGIN SELECT RAISE(ABORT, 'certification evidence is append-only'); END""")
         db.execute("""CREATE TRIGGER IF NOT EXISTS certification_observations_no_delete
@@ -127,12 +128,18 @@ class DurableCertificationEvidence:
             raise
 
     def verify_audit_chain(self) -> bool:
+        observation_count = self.db.execute("SELECT COUNT(*) FROM certification_observations").fetchone()[0]
+        audit_count = self.db.execute("SELECT COUNT(*) FROM certification_audit").fetchone()[0]
+        if observation_count != audit_count:
+            return False
         rows = self.db.execute("""SELECT a.sequence,o.binding,o.host_identity,o.authority,o.source_identity,
             o.synchronization_epoch,o.utc_seconds,o.uncertainty_seconds,o.receipt_monotonic_ns,
             o.expires_monotonic_ns,o.utc_sequence,o.raw_mt5_time,o.raw_mt5_time_msc,o.bid,o.ask,
             o.invalidation_reason,o.recorded_utc,a.prior_hash,a.record_hash
             FROM certification_observations o JOIN certification_audit a ON a.observation_sequence=o.sequence
             ORDER BY o.sequence""").fetchall()
+        if len(rows) != observation_count:
+            return False
         prior_hash = "GENESIS"
         for expected_sequence, row in enumerate(rows, start=1):
             sequence, values, saved_prior, saved_hash = row[0], row[1:-2], row[-2], row[-1]
@@ -153,10 +160,11 @@ class DurableCertificationEvidence:
 class RiskQualificationEvaluator:
     """Explains why durable evidence cannot, or can someday, qualify a flat DEMO."""
 
-    def evaluate(self, *, binding: str, rows, history: BrokerHistoryEvidence | None,
-                 audit_valid: bool = False) -> QualificationDecision:
-        if not audit_valid:
+    def evaluate(self, *, binding: str, ledger: DurableCertificationEvidence | None,
+                 history: BrokerHistoryEvidence | None) -> QualificationDecision:
+        if not isinstance(ledger, DurableCertificationEvidence) or not ledger.verify_audit_chain():
             return QualificationDecision("INCOMPLETE", "Tamper-evident audit chain is unavailable or invalid")
+        rows = ledger.rows(binding)
         if not isinstance(history, BrokerHistoryEvidence) or history._issuer is not _HISTORY_ISSUER:
             return QualificationDecision("INCOMPLETE", "Authenticated broker-history evidence is unavailable")
         if (history.binding != binding or not history.complete or not history.flat

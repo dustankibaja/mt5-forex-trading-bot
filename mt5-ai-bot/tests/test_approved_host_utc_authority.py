@@ -33,7 +33,7 @@ def test_approved_host_measurement_contains_bounded_utc_and_host_identity():
 
 def test_invalid_host_or_untrusted_reference_record_never_measures():
     assert adapter().measure(references(host_identity="other"), monotonic_ns=1_000_000_000) is None
-    direct = AuthenticatedReferenceSet("approved-authority", "host-1", ("fp-a", "fp-b"),
+    direct = AuthenticatedReferenceSet("approved-authority", "host-1", ("fp-a", "fp-b"), (),
                                        "epoch-1", references().calibration)
     assert adapter().measure(direct, monotonic_ns=1_000_000_000) is None
 
