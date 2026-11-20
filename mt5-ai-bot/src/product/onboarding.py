@@ -4,12 +4,14 @@ This module never accepts brokerage credentials, switches accounts, or sends ord
 """
 from __future__ import annotations
 
-import hashlib
 import math
 import os
 from pathlib import Path
+import secrets
 import time
 from typing import Any, Iterable
+
+from src.execution.quote_time_certification import QuoteTimeCertifier, QuoteTimeState
 
 
 COMMON_TERMINALS = (
@@ -104,11 +106,29 @@ def inspect_existing_demo(
         raw_tick_seconds = getattr(tick, "time", None) if tick else None
         receipt = time.time() if now_s is None else now_s
         raw_age = receipt - float(raw_tick_seconds) if _positive(raw_tick_seconds) else None
-        clock_certified = False
+        # This onboarding path intentionally has no independently bounded UTC
+        # evidence or broker-semantics attestation, so the certifier fails
+        # closed while retaining the raw broker fields below.
+        certification = QuoteTimeCertifier().assess(
+            tick, utc=None, semantics=None,
+        )
+        clock_certified = certification.state == QuoteTimeState.CERTIFIED
         checks.append(_check(
             "Execution clock",
+            clock_certified,
+            certification.reason if clock_certified else
+            "Quote-time certification is still required before DEMO execution: " + certification.reason,
+        ))
+        checks.append(_check(
+            "Risk qualification",
             False,
-            "Quote-time certification is still required before DEMO execution",
+            "A verified UTC-day risk baseline has not completed its observation period",
+        ))
+        checks.append(_check(
+            "Broker reconciliation",
+            False,
+            "Untested: no Emtifize broker outcome exists yet. Reconciliation is required after a separately authorised supervised test, not to propose the first one.",
+            phase="post_execution",
         ))
 
         identity = None
@@ -119,20 +139,24 @@ def inspect_existing_demo(
             raw_server = getattr(account, "server", None)
             if login is not None and isinstance(raw_server, str) and raw_server.strip():
                 server = raw_server.strip()
-                masked = _masked_login(login)
-                identity = hashlib.sha256(
-                    f"{login}|{server}".encode("utf-8")
-                ).hexdigest()
+                # Public onboarding output uses an opaque local-session ID that
+                # is independent of the real account number. Durable account
+                # isolation is enforced by the separately salted local binding.
+                identity = secrets.token_hex(32)
+                masked = f"DEMO-{identity[:8].upper()}"
 
         account_verified = connected and is_demo and available and valid_quote and identity is not None
-        blockers = [item["detail"] for item in checks if not item["passed"]]
+        blockers = [
+            item["detail"] for item in checks
+            if not item["passed"] and item["phase"] == "pre_execution"
+        ]
         return {
             "schema": "emtifize-onboarding-v1",
             "account_verified": account_verified,
             "demo_only": True,
             "execution_allowed": False,
             "execution_blocked_reason": (
-                "DEMO execution stays locked until quote-time and product safety review pass."
+                "DEMO execution stays locked until pre-execution quote-time, risk, permission and product safety review pass."
             ),
             "terminal_path": str(terminal_path),
             "account_fingerprint": identity,
@@ -153,8 +177,21 @@ def inspect_existing_demo(
         api.shutdown()
 
 
-def _check(name: str, passed: bool, detail: str) -> dict[str, Any]:
-    return {"name": name, "passed": bool(passed), "detail": detail}
+def _check(
+    name: str,
+    passed: bool,
+    detail: str,
+    *,
+    phase: str = "pre_execution",
+) -> dict[str, Any]:
+    if phase not in {"pre_execution", "post_execution"}:
+        raise ValueError("Invalid readiness check phase")
+    return {
+        "name": name,
+        "passed": bool(passed),
+        "detail": detail,
+        "phase": phase,
+    }
 
 
 def _failure(message: str) -> dict[str, Any]:

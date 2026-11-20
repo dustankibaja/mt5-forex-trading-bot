@@ -1,0 +1,177 @@
+"""Approved-host verification of nonce-bound authority time assertions.
+
+Protocol ``emtifize-signed-utc-v1``: the host generates a random challenge;
+the authority signs the exact canonical assertion below (including that
+challenge and its asserted UTC interval). The host records send/receipt
+monotonic timestamps separately, then verifies the detached signature against
+the authority-to-pinned-key map. Ordinary NTP, labels and fixture factories are
+not accepted as authentication.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import hashlib
+import json
+import math
+import secrets
+
+
+_VERIFIED_TRANSCRIPT_ISSUER = object()
+_PROTOCOL = "emtifize-signed-utc-v1"
+
+
+@dataclass(frozen=True)
+class AuthorityTimeAssertion:
+    authority_id: str
+    source_family: str
+    key_fingerprint: str
+    synchronization_epoch: str
+    challenge: str
+    utc_seconds: float
+    uncertainty_seconds: float
+    signature: bytes
+
+    def canonical_payload(self) -> bytes:
+        """UTF-8 JSON, sorted keys and compact separators, exactly as signed."""
+        values = {key: getattr(self, key) for key in (
+            "authority_id", "source_family", "key_fingerprint", "synchronization_epoch",
+            "challenge", "utc_seconds", "uncertainty_seconds")}
+        return json.dumps({"protocol": _PROTOCOL, "assertion": values}, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+@dataclass(frozen=True)
+class HostReceipt:
+    host_identity: str
+    sent_monotonic_ns: int
+    received_monotonic_ns: int
+    assertion: AuthorityTimeAssertion
+
+
+@dataclass(frozen=True)
+class HostChallenge:
+    authority_id: str
+    host_identity: str
+    synchronization_epoch: str
+    challenge: str
+    issued_monotonic_ns: int
+    expires_monotonic_ns: int
+
+
+@dataclass(frozen=True)
+class VerifiedUtcTranscript:
+    receipt: HostReceipt
+    transcript_digest: str
+    _issuer: object | None = field(default=None, repr=False, compare=False)
+
+
+class ApprovedHostSignedUtcVerifier:
+    """Verifies signed assertions and durably consumes each challenge.
+
+    ``verify_detached`` is supplied by the approved host's reviewed
+    cryptographic provider (for example Ed25519 with pinned public keys). The
+    local SQLite database stores only consumed challenge digests, so replay is
+    rejected across an ordinary process restart.
+    """
+    def __init__(self, *, host_identity: str, authority_keys: dict[str, frozenset[str]],
+                 replay_db, verify_detached=None, authority_verifier=None,
+                 max_network_delay_ns: int = 2_000_000_000):
+        if (not host_identity or not authority_keys or (not callable(verify_detached) and authority_verifier is None)
+                or max_network_delay_ns <= 0):
+            raise ValueError("approved host signature-verifier configuration is required")
+        self._host_identity = host_identity
+        self._authority_keys = {key: frozenset(value) for key, value in authority_keys.items()}
+        if any(not key or not value for key, value in self._authority_keys.items()):
+            raise ValueError("every authority requires pinned key fingerprints")
+        if authority_verifier is not None:
+            configured = {key: frozenset(value) for key, value in authority_verifier.authority_key_fingerprints.items()}
+            if configured != self._authority_keys or not callable(getattr(authority_verifier, "verify_assertion", None)):
+                raise ValueError("authority verifier must exactly match the pinned authority/key policy")
+        self._db = replay_db
+        self._verify_detached = verify_detached
+        self._authority_verifier = authority_verifier
+        self._max_network_delay_ns = max_network_delay_ns
+        self._db.execute("""CREATE TABLE IF NOT EXISTS issued_utc_challenges(
+            challenge_digest TEXT PRIMARY KEY, authority_id TEXT NOT NULL,
+            host_identity TEXT NOT NULL, synchronization_epoch TEXT NOT NULL,
+            issued_monotonic_ns INTEGER NOT NULL, expires_monotonic_ns INTEGER NOT NULL)""")
+        self._db.execute("""CREATE TABLE IF NOT EXISTS consumed_utc_challenges(
+            challenge_digest TEXT PRIMARY KEY, authority_id TEXT NOT NULL,
+            host_identity TEXT NOT NULL, synchronization_epoch TEXT NOT NULL,
+            consumed_monotonic_ns INTEGER NOT NULL,
+            FOREIGN KEY(challenge_digest) REFERENCES issued_utc_challenges(challenge_digest))""")
+
+    def issue_challenge(self, *, authority_id: str, synchronization_epoch: str,
+                        issued_monotonic_ns: int, ttl_ns: int,
+                        challenge: str | None = None) -> HostChallenge:
+        """Durably register a host challenge before sending it to an authority."""
+        if (authority_id not in self._authority_keys or not synchronization_epoch
+                or type(issued_monotonic_ns) is not int or type(ttl_ns) is not int or ttl_ns <= 0):
+            raise ValueError("valid authority, epoch, monotonic issue time and TTL are required")
+        value = challenge or secrets.token_urlsafe(32)
+        if not isinstance(value, str) or not value:
+            raise ValueError("challenge is required")
+        expires = issued_monotonic_ns + ttl_ns
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+        with self._db:
+            self._db.execute("INSERT INTO issued_utc_challenges VALUES(?,?,?,?,?,?)", (
+                digest, authority_id, self._host_identity, synchronization_epoch,
+                issued_monotonic_ns, expires))
+        return HostChallenge(authority_id, self._host_identity, synchronization_epoch,
+                             value, issued_monotonic_ns, expires)
+
+    def verify(self, receipt: HostReceipt | None) -> VerifiedUtcTranscript | None:
+        if receipt is None or receipt.host_identity != self._host_identity:
+            return None
+        assertion = receipt.assertion
+        if (assertion.authority_id not in self._authority_keys
+                or assertion.key_fingerprint not in self._authority_keys[assertion.authority_id]
+                or not all(isinstance(value, str) and value for value in
+                           (assertion.source_family, assertion.synchronization_epoch, assertion.challenge))
+                or type(receipt.sent_monotonic_ns) is not int
+                or type(receipt.received_monotonic_ns) is not int
+                or receipt.received_monotonic_ns <= receipt.sent_monotonic_ns
+                or receipt.received_monotonic_ns - receipt.sent_monotonic_ns > self._max_network_delay_ns
+                or not all(math.isfinite(value) for value in
+                           (assertion.utc_seconds, assertion.uncertainty_seconds))
+                or assertion.uncertainty_seconds < 0):
+            return None
+        payload = assertion.canonical_payload()
+        if self._authority_verifier is not None:
+            valid_signature = self._authority_verifier.verify_assertion(
+                authority_id=assertion.authority_id, key_fingerprint=assertion.key_fingerprint,
+                canonical_payload=payload, signature=assertion.signature)
+        else:
+            valid_signature = self._verify_detached(assertion.key_fingerprint, payload, assertion.signature)
+        if not valid_signature:
+            return None
+        challenge_digest = hashlib.sha256(assertion.challenge.encode("utf-8")).hexdigest()
+        try:
+            self._db.execute("BEGIN IMMEDIATE")
+            issued = self._db.execute("""SELECT authority_id,host_identity,synchronization_epoch,
+                issued_monotonic_ns,expires_monotonic_ns FROM issued_utc_challenges WHERE challenge_digest=?""",
+                                      (challenge_digest,)).fetchone()
+            if (issued is None or issued[:3] != (assertion.authority_id, self._host_identity,
+                                                  assertion.synchronization_epoch)
+                    or not issued[3] <= receipt.sent_monotonic_ns <= receipt.received_monotonic_ns <= issued[4]):
+                self._db.execute("ROLLBACK")
+                return None
+            self._db.execute("INSERT INTO consumed_utc_challenges VALUES(?,?,?,?,?)", (
+                challenge_digest, assertion.authority_id, self._host_identity,
+                assertion.synchronization_epoch, receipt.received_monotonic_ns))
+            self._db.execute("COMMIT")
+        except Exception:
+            if self._db.in_transaction:
+                self._db.execute("ROLLBACK")
+            return None
+        digest = hashlib.sha256(payload + assertion.signature + str(receipt.sent_monotonic_ns).encode()
+                                + str(receipt.received_monotonic_ns).encode()).hexdigest()
+        return VerifiedUtcTranscript(receipt, digest, _VERIFIED_TRANSCRIPT_ISSUER)
+
+    @property
+    def host_identity(self) -> str:
+        return self._host_identity
+
+
+def _is_verified_transcript(value: object) -> bool:
+    return isinstance(value, VerifiedUtcTranscript) and value._issuer is _VERIFIED_TRANSCRIPT_ISSUER

@@ -60,9 +60,18 @@ def test_verifies_existing_demo_but_keeps_execution_locked(tmp_path):
     assert result["account_verified"] is True
     assert result["demo_only"] is True
     assert result["execution_allowed"] is False
-    assert result["account_label"] == "••••5678"
     assert len(result["account_fingerprint"]) == 64
+    assert result["account_label"].startswith("DEMO-")
+    assert result["account_label"] == "DEMO-" + result["account_fingerprint"][:8].upper()
     assert result["quote"]["clock_certified"] is False
+    assert {item["name"] for item in result["checks"]} >= {
+        "Risk qualification", "Broker reconciliation"
+    }
+    reconciliation = next(item for item in result["checks"]
+                          if item["name"] == "Broker reconciliation")
+    assert reconciliation["phase"] == "post_execution"
+    assert reconciliation["detail"].startswith("Untested:")
+    assert reconciliation["detail"] not in result["blockers"]
     assert "login" not in result
     assert api.shutdown_called
 

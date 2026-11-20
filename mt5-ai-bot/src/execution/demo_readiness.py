@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import math
 import hashlib
+import secrets
 import time
 from dataclasses import dataclass
 from typing import Any
 
 from src.execution.demo_quote_time import quote_time_blocker
+from src.execution.order_builder import allowed_fillings
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,7 @@ class DemoReadiness:
     existing_positions: int | None
     pending_orders: int | None
     filling_modes: tuple[int, ...]
+    filling_policy_names: tuple[str, ...]
     stop_level_points: int | None
     freeze_level_points: int | None
     contract_size: float | None
@@ -53,6 +56,7 @@ class DemoReadiness:
             "existing_positions": self.existing_positions,
             "pending_orders": self.pending_orders,
             "filling_modes": list(self.filling_modes),
+            "filling_policies": list(self.filling_policy_names),
             "stop_level_points": self.stop_level_points,
             "freeze_level_points": self.freeze_level_points,
             "contract_size": self.contract_size,
@@ -89,6 +93,7 @@ def inspect_demo_execution_conditions(
     account_identity = terminal_identity = None
     existing_positions = pending_orders = None
     filling_modes: tuple[int, ...] = ()
+    filling_policy_names: tuple[str, ...] = ()
     stop_level = freeze_level = margin_mode = None
     contract_size = None
 
@@ -128,8 +133,10 @@ def inspect_demo_execution_conditions(
     if account is not None:
         login, server = getattr(account, "login", None), getattr(account, "server", None)
         if isinstance(login, int) and login > 0 and isinstance(server, str) and server:
-            digest = hashlib.sha256(f"{server}|{login}".encode()).hexdigest()
-            account_identity = f"••••{str(login)[-4:]} · {server[:3]}… · {digest[:12]}"
+            # A public, session-scoped opaque label must reveal no deterministic
+            # derivative of the login. Durable identity is handled separately by
+            # the salted local account binding.
+            account_identity = f"DEMO-{secrets.token_hex(4).upper()}"
         else:
             blockers.append("Verified account identity is unavailable")
         margin_mode = getattr(account, "margin_mode", None)
@@ -167,8 +174,16 @@ def inspect_demo_execution_conditions(
         freeze_level = getattr(info, "trade_freeze_level", None)
         contract_size = getattr(info, "trade_contract_size", None)
         filling = getattr(info, "filling_mode", None)
-        if isinstance(filling, int):
-            filling_modes = tuple(mode for bit, mode in ((1, 0), (2, 1), (4, 2)) if filling & bit)
+        try:
+            filling_modes = tuple(allowed_fillings(info, operation="market"))
+        except ValueError:
+            filling_modes = ()
+        names = {
+            getattr(api, "ORDER_FILLING_FOK", None): "Fill or Kill",
+            getattr(api, "ORDER_FILLING_IOC", None): "Immediate or Cancel",
+            getattr(api, "ORDER_FILLING_RETURN", None): "Return",
+        }
+        filling_policy_names = tuple(names[mode] for mode in filling_modes if mode in names)
         if not _finite_positive(contract_size): blockers.append("Invalid broker contract size")
         if not isinstance(freeze_level, int) or freeze_level < 0: blockers.append("Invalid broker freeze level")
         if not filling_modes: blockers.append("No supported broker filling mode reported")
@@ -235,6 +250,7 @@ def inspect_demo_execution_conditions(
         existing_positions=existing_positions,
         pending_orders=pending_orders,
         filling_modes=filling_modes,
+        filling_policy_names=filling_policy_names,
         stop_level_points=stop_level,
         freeze_level_points=freeze_level,
         contract_size=float(contract_size) if _finite_positive(contract_size) else None,
