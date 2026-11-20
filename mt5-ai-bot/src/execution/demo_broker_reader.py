@@ -89,13 +89,15 @@ def _next_risk_status(prior, observation, session: str, trusted_utc: bool, reaso
         return status, reason
     if prior[5] == "INVALIDATED":
         return prior[5], prior[6]
+    if prior[2] != session:
+        return "INVALIDATED", "Observation continuity lost"
     if not trusted_utc:
         if prior[5] == "OBSERVING":
             return "INVALIDATED", "UTC evidence continuity lost"
         return "INCOMPLETE", "Independently certified UTC evidence unavailable"
     elapsed = (observation.received - datetime.fromisoformat(prior[3])).total_seconds()
     monotonic_elapsed = (observation.monotonic_ns - prior[4]) / 1e9
-    if (prior[2] != session or not 0 < elapsed <= 2
+    if (not 0 < elapsed <= 2
             or not 0 < monotonic_elapsed <= 2 or abs(monotonic_elapsed - elapsed) > .25):
         return "INVALIDATED", "Observation continuity lost"
     return "OBSERVING", reason

@@ -166,6 +166,11 @@ def test_existing_invalidation_is_preserved_even_with_trusted_utc():
     assert (status, reason) == ("INVALIDATED", "history missing")
 
 
+def test_reader_restart_invalidates_even_when_utc_evidence_is_missing():
+    status, reason = reader._next_risk_status(_prior(), _observation(), "new-session", False, "unused")
+    assert (status, reason) == ("INVALIDATED", "Observation continuity lost")
+
+
 def test_history_reconciliation_reports_partial_fill_from_linked_deals(session):
     adapter, api = session
     api.history_orders_get = lambda start,end: (Row(ticket=11, symbol="EURUSD", type=0,
