@@ -5,6 +5,10 @@ pyyaml==6.0.2
 python-dotenv==1.0.1
 pytz==2024.1
 requests==2.32.3
+# Reviewed public-key verification for the approved-host signed-time boundary.
+# This package verifies public signatures only; no production private key is
+# stored in the repository or package.
+cryptography>=42.0.0,<46.0.0
 
 pyarrow==16.1.0; python_version < "3.13"
 
