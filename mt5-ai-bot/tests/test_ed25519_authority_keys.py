@@ -6,7 +6,9 @@ import sqlite3
 from src.execution.authenticated_utc_transport import (
     ApprovedHostSignedUtcVerifier, AuthorityTimeAssertion, HostReceipt,
 )
-from src.execution.ed25519_authority_keys import Ed25519AuthorityKeyring, public_key_fingerprint
+from src.execution.ed25519_authority_keys import (
+    AuthorityBoundEd25519Verifier, Ed25519AuthorityKeyring, public_key_fingerprint,
+)
 
 
 def test_rfc8032_empty_message_vector_verifies_without_any_private_fixture_key():
@@ -42,9 +44,10 @@ def test_signed_transport_uses_the_real_keyring_when_configured():
     raw = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     fingerprint = public_key_fingerprint(raw)
     keyring = Ed25519AuthorityKeyring({"authority": {fingerprint: raw}})
+    adapter = AuthorityBoundEd25519Verifier(keyring)
     checked = ApprovedHostSignedUtcVerifier(
         host_identity="host", authority_keys=keyring.authority_key_fingerprints,
-        authority_keyring=keyring, replay_db=sqlite3.connect(":memory:"))
+        authority_verifier=adapter, replay_db=sqlite3.connect(":memory:"))
     challenge = checked.issue_challenge(authority_id="authority", synchronization_epoch="epoch",
                                         issued_monotonic_ns=1, ttl_ns=100, challenge="nonce")
     unsigned = AuthorityTimeAssertion("authority", "family", fingerprint, "epoch", challenge.challenge,

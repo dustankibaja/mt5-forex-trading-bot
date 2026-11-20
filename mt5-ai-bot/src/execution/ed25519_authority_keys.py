@@ -64,3 +64,20 @@ class Ed25519AuthorityKeyring:
         except (InvalidSignature, ValueError, TypeError):
             return False
         return True
+
+
+class AuthorityBoundEd25519Verifier:
+    """Explicit adapter accepted by the signed-time transport."""
+
+    def __init__(self, keyring: Ed25519AuthorityKeyring):
+        if not isinstance(keyring, Ed25519AuthorityKeyring):
+            raise ValueError("a concrete Ed25519 authority keyring is required")
+        self._keyring = keyring
+
+    @property
+    def authority_key_fingerprints(self) -> dict[str, frozenset[str]]:
+        return self._keyring.authority_key_fingerprints
+
+    def verify_assertion(self, *, authority_id: str, key_fingerprint: str,
+                         canonical_payload: bytes, signature: bytes) -> bool:
+        return self._keyring.verify(authority_id, key_fingerprint, canonical_payload, signature)

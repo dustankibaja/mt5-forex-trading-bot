@@ -74,18 +74,22 @@ class ApprovedHostSignedUtcVerifier:
     rejected across an ordinary process restart.
     """
     def __init__(self, *, host_identity: str, authority_keys: dict[str, frozenset[str]],
-                 replay_db, verify_detached=None, authority_keyring=None,
+                 replay_db, verify_detached=None, authority_verifier=None,
                  max_network_delay_ns: int = 2_000_000_000):
-        if (not host_identity or not authority_keys or (not callable(verify_detached) and authority_keyring is None)
+        if (not host_identity or not authority_keys or (not callable(verify_detached) and authority_verifier is None)
                 or max_network_delay_ns <= 0):
             raise ValueError("approved host signature-verifier configuration is required")
         self._host_identity = host_identity
         self._authority_keys = {key: frozenset(value) for key, value in authority_keys.items()}
         if any(not key or not value for key, value in self._authority_keys.items()):
             raise ValueError("every authority requires pinned key fingerprints")
+        if authority_verifier is not None:
+            configured = {key: frozenset(value) for key, value in authority_verifier.authority_key_fingerprints.items()}
+            if configured != self._authority_keys or not callable(getattr(authority_verifier, "verify_assertion", None)):
+                raise ValueError("authority verifier must exactly match the pinned authority/key policy")
         self._db = replay_db
         self._verify_detached = verify_detached
-        self._authority_keyring = authority_keyring
+        self._authority_verifier = authority_verifier
         self._max_network_delay_ns = max_network_delay_ns
         self._db.execute("""CREATE TABLE IF NOT EXISTS issued_utc_challenges(
             challenge_digest TEXT PRIMARY KEY, authority_id TEXT NOT NULL,
@@ -133,9 +137,10 @@ class ApprovedHostSignedUtcVerifier:
                 or assertion.uncertainty_seconds < 0):
             return None
         payload = assertion.canonical_payload()
-        if self._authority_keyring is not None:
-            valid_signature = self._authority_keyring.verify(
-                assertion.authority_id, assertion.key_fingerprint, payload, assertion.signature)
+        if self._authority_verifier is not None:
+            valid_signature = self._authority_verifier.verify_assertion(
+                authority_id=assertion.authority_id, key_fingerprint=assertion.key_fingerprint,
+                canonical_payload=payload, signature=assertion.signature)
         else:
             valid_signature = self._verify_detached(assertion.key_fingerprint, payload, assertion.signature)
         if not valid_signature:
@@ -162,6 +167,10 @@ class ApprovedHostSignedUtcVerifier:
         digest = hashlib.sha256(payload + assertion.signature + str(receipt.sent_monotonic_ns).encode()
                                 + str(receipt.received_monotonic_ns).encode()).hexdigest()
         return VerifiedUtcTranscript(receipt, digest, _VERIFIED_TRANSCRIPT_ISSUER)
+
+    @property
+    def host_identity(self) -> str:
+        return self._host_identity
 
 
 def _is_verified_transcript(value: object) -> bool:

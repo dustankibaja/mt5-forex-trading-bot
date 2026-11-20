@@ -23,18 +23,33 @@ def evidence():
 
 def test_runner_requires_activation_and_never_declares_fixture_evidence_certified():
     checked = verifier()
-    runner = ApprovedHostCertificationRunner(verifier=checked, host_identity="host", account_binding="demo",
-                                             monotonic_clock_ns=lambda: 10)
-    with pytest.raises(PermissionError):
-        runner.issue(authority_id="authority", synchronization_epoch="epoch", ttl_ns=100)
-    enabled = ApprovedHostCertificationRunner(verifier=checked, host_identity="host", account_binding="demo",
-                                              operator_enabled=True, monotonic_clock_ns=lambda: 10)
-    challenge = enabled.issue(authority_id="authority", synchronization_epoch="epoch", ttl_ns=100)
-    assertion = AuthorityTimeAssertion("authority", "family", "key", "epoch", challenge.challenge,
-                                       1000.0, .01, b"valid")
-    result = enabled.collect(assertion, sent_monotonic_ns=10, received_monotonic_ns=20)
+    runner = ApprovedHostCertificationRunner(verifier=checked, host_identity="host", account_binding="demo")
+    assert not runner.collect_exchange(authority_id="authority", synchronization_epoch="epoch", ttl_ns=100,
+                                       request_assertion=lambda _: None).certified
+    clock_values = iter((1, 10, 20))
+    enabled = ApprovedHostCertificationRunner.for_test(
+        verifier=checked, host_identity="host", account_binding="demo", operator_enabled=True,
+        monotonic_clock_ns=lambda: next(clock_values))
+    def response(challenge):
+        return AuthorityTimeAssertion("authority", "family", "key", "epoch", challenge.challenge,
+                                      1000.0, .01, b"valid")
+    result = enabled.collect_exchange(authority_id="authority", synchronization_epoch="epoch", ttl_ns=100,
+                                      request_assertion=response)
     assert result.transcript is not None
     assert not result.certified
+
+
+def test_runner_rejects_non_advancing_or_reordered_test_monotonic_clock():
+    checked = verifier()
+    clock_values = iter((1, 10, 10))
+    runner = ApprovedHostCertificationRunner.for_test(
+        verifier=checked, host_identity="host", account_binding="demo", operator_enabled=True,
+        monotonic_clock_ns=lambda: next(clock_values))
+    result = runner.collect_exchange(authority_id="authority", synchronization_epoch="epoch", ttl_ns=100,
+        request_assertion=lambda challenge: AuthorityTimeAssertion(
+            "authority", "family", "key", "epoch", challenge.challenge, 1000.0, .01, b"valid"))
+    assert result.transcript is None
+    assert "inconsistent" in result.reason
 
 
 def test_mt5_bridge_retains_raw_values_and_marks_only_repeated_raw_ticks_cached():
