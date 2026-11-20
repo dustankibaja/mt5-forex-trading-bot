@@ -114,7 +114,7 @@ class QuoteTimeCertifier:
                 or utc.source_identity != semantics.source_identity):
             return self._result(QuoteTimeState.UNCERTIFIED, "UTC or broker timestamp evidence is inconsistent", seconds, milliseconds, utc)
         now_ns = self._monotonic_clock_ns()
-        if (type(now_ns) is not int or not all(math.isfinite(value) for value in
+        if (type(now_ns) is not int or not all(type(value) in (int, float) and math.isfinite(value) for value in
                 (utc.utc_seconds, utc.uncertainty_seconds))
                 or utc.uncertainty_seconds < 0 or utc.uncertainty_seconds > self.max_uncertainty_seconds
                 or type(utc.monotonic_ns) is not int or type(utc.expires_monotonic_ns) is not int
@@ -123,6 +123,8 @@ class QuoteTimeCertifier:
             return self._result(QuoteTimeState.UNCERTIFIED, "UTC uncertainty evidence is invalid or excessive", seconds, milliseconds, utc)
         if now_ns > utc.expires_monotonic_ns:
             return self._result(QuoteTimeState.UNCERTIFIED, "UTC evidence expired", seconds, milliseconds, utc)
+        if self._last_now_ns is None and utc.observation_sequence != 1:
+            return self._result(QuoteTimeState.UNCERTIFIED, "First UTC evidence observation must start at sequence one", seconds, milliseconds, utc)
         if self._last_now_ns is not None:
             if now_ns <= self._last_now_ns:
                 return self._revoke("Host monotonic clock did not advance", seconds, milliseconds, utc)

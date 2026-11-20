@@ -41,6 +41,19 @@ def test_new_certifier_requires_successive_controlled_observations():
     assert result.raw_provider_milliseconds == 1_000_900
 
 
+def test_new_certifier_rejects_a_first_observation_with_a_skipped_sequence():
+    result = QuoteTimeCertifier(monotonic_clock_ns=lambda: 10).assess(
+        tick(999_900), utc=evidence(sequence=2), semantics=semantics())
+    assert result.state == QuoteTimeState.UNCERTIFIED
+    assert result.reason == "First UTC evidence observation must start at sequence one"
+
+
+def test_invalid_numeric_evidence_fails_closed_without_throwing():
+    result = QuoteTimeCertifier(monotonic_clock_ns=lambda: 10).assess(
+        tick(999_900), utc=evidence(utc="not-a-number"), semantics=semantics())
+    assert result.state == QuoteTimeState.UNCERTIFIED
+
+
 def test_actual_monotonic_reading_expires_evidence():
     result = QuoteTimeCertifier(monotonic_clock_ns=lambda: 21).assess(
         tick(999_900), utc=evidence(expires=20), semantics=semantics())
