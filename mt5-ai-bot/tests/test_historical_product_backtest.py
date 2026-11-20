@@ -16,6 +16,9 @@ def rows():
         out.append({"timestamp":(start+timedelta(hours=i)).isoformat(),"bid_open":v,"bid_high":v+.001,"bid_low":v-.001,"bid_close":v,"ask_open":v+.0002,"ask_high":v+.0012,"ask_low":v-.0008,"ask_close":v+.0002})
     return out
 
+def flat_rows():
+    return [{**row,"bid_open":1.1,"bid_high":1.101,"bid_low":1.099,"bid_close":1.1,"ask_open":1.1002,"ask_high":1.1012,"ask_low":1.0992,"ask_close":1.1002} for row in rows()]
+
 def test_replay_is_deterministic_except_run_identity():
     ds={"identifier":"independent-reference-fixture","content_hash":"fixed","source":"independent arithmetic fixture","price_basis":"bid_ask","eligible_for_backtest":True}
     a=run(strategy(),rows(),initial_balance=10000,dataset=ds,costs=CostModel())
@@ -28,7 +31,7 @@ def test_replay_is_deterministic_except_run_identity():
 
 def test_portable_report_preserves_provenance_and_unavailable_metrics():
     ds={"identifier":"fixture","content_hash":"fixed","source":"identified fixture","price_basis":"bid_ask","eligible_for_backtest":True}
-    result=run(strategy(),rows(),initial_balance=10000,dataset=ds)
+    result=run(strategy(),flat_rows(),initial_balance=10000,dataset=ds)
     report=build(result)
     assert report["label"].startswith("HISTORICAL SIMULATION") and report["execution_enabled"] is False
     assert report["dataset"]["content_hash"]=="fixed"
