@@ -31,6 +31,7 @@ class UtcEvidence:
     monotonic_ns: int
     expires_monotonic_ns: int
     account_binding: str = ""
+    host_identity: str = ""
     source_identity: str = ""
     sync_epoch: str = ""
     observation_sequence: int = 0
@@ -52,11 +53,11 @@ class BrokerTimestampSemantics:
 def _verified_utc_evidence(*, source: str, utc_seconds: float,
                            uncertainty_seconds: float, monotonic_ns: int,
                            expires_monotonic_ns: int, account_binding: str,
-                           source_identity: str, sync_epoch: str,
+                           host_identity: str, source_identity: str, sync_epoch: str,
                            observation_sequence: int) -> UtcEvidence:
     """Internal adapter factory; do not expose this to UI/API callers."""
     return UtcEvidence(source, utc_seconds, uncertainty_seconds, monotonic_ns,
-                       expires_monotonic_ns, account_binding, source_identity,
+                       expires_monotonic_ns, account_binding, host_identity, source_identity,
                        sync_epoch, observation_sequence, _UTC_ISSUER)
 
 
@@ -96,12 +97,14 @@ class QuoteTimeCertifier:
         self._last_quote_msc: int | None = None
         self._last_sequence: int | None = None
         self._account_binding: str | None = None
+        self._host_identity: str | None = None
         self._source_identity: str | None = None
         self._sync_epoch: str | None = None
         self._revoked = False
 
     def assess(self, tick, *, utc: UtcEvidence | None,
-               semantics: BrokerTimestampSemantics | None) -> QuoteCertification:
+               semantics: BrokerTimestampSemantics | None,
+               observation_host_identity: str | None = None) -> QuoteCertification:
         seconds = getattr(tick, "time", None)
         milliseconds = getattr(tick, "time_msc", None)
         if self._revoked:
@@ -111,12 +114,13 @@ class QuoteTimeCertifier:
         if utc._issuer is not _UTC_ISSUER or semantics._issuer is not _SEMANTICS_ISSUER:
             return self._result(QuoteTimeState.UNCERTIFIED, "UTC or broker timestamp evidence is not internally verified", seconds, milliseconds, utc)
         if (not all(isinstance(value, str) and value for value in
-                    (utc.source, utc.account_binding, utc.source_identity, utc.sync_epoch,
+                    (utc.source, utc.account_binding, utc.host_identity, utc.source_identity, utc.sync_epoch,
                      semantics.provider, semantics.evidence_id, semantics.account_binding,
                      semantics.source_identity))
                 or semantics.kind != "UTC_EPOCH_SECONDS"
                 or utc.account_binding != semantics.account_binding
-                or utc.source_identity != semantics.source_identity):
+                or utc.source_identity != semantics.source_identity
+                or observation_host_identity != utc.host_identity):
             return self._result(QuoteTimeState.UNCERTIFIED, "UTC or broker timestamp evidence is inconsistent", seconds, milliseconds, utc)
         now_ns = self._monotonic_clock_ns()
         if (type(now_ns) is not int or not all(type(value) in (int, float) and math.isfinite(value) for value in
@@ -135,7 +139,8 @@ class QuoteTimeCertifier:
                 return self._revoke("Host monotonic clock did not advance", seconds, milliseconds, utc)
             if utc.utc_seconds + utc.uncertainty_seconds < self._last_utc_seconds - utc.uncertainty_seconds:
                 return self._revoke("Host UTC clock rolled back", seconds, milliseconds, utc)
-            if (utc.account_binding != self._account_binding or utc.source_identity != self._source_identity
+            if (utc.account_binding != self._account_binding or utc.host_identity != self._host_identity
+                    or utc.source_identity != self._source_identity
                     or utc.sync_epoch != self._sync_epoch):
                 return self._revoke("Account binding, source identity, or time synchronization changed", seconds, milliseconds, utc)
             if utc.observation_sequence != self._last_sequence + 1:
@@ -152,8 +157,8 @@ class QuoteTimeCertifier:
             return self._result(QuoteTimeState.UNCERTIFIED, "Broker quote exceeds certified freshness window", seconds, milliseconds, utc)
         self._last_now_ns, self._last_utc_seconds = now_ns, utc.utc_seconds
         self._last_quote_msc, self._last_sequence = milliseconds, utc.observation_sequence
-        self._account_binding, self._source_identity, self._sync_epoch = (
-            utc.account_binding, utc.source_identity, utc.sync_epoch)
+        self._account_binding, self._host_identity, self._source_identity, self._sync_epoch = (
+            utc.account_binding, utc.host_identity, utc.source_identity, utc.sync_epoch)
         if self._last_sequence == 1:
             return self._result(QuoteTimeState.UNCERTIFIED, "First verified quote establishes continuity", seconds, milliseconds, utc)
         return self._result(QuoteTimeState.CERTIFIED, "Fresh successive quote under verified UTC and broker semantics", seconds, milliseconds, utc)

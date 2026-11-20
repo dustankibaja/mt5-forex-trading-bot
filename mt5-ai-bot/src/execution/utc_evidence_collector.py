@@ -24,6 +24,7 @@ class IndependentUtcMeasurement:
 
     source: str
     source_identity: str
+    host_identity: str
     utc_seconds: float
     uncertainty_seconds: float
     measured_monotonic_ns: int
@@ -33,13 +34,14 @@ class IndependentUtcMeasurement:
 
 
 def _verified_independent_utc_measurement(*, source: str, source_identity: str,
+                                          host_identity: str,
                                           utc_seconds: float, uncertainty_seconds: float,
                                           measured_monotonic_ns: int,
                                           expires_monotonic_ns: int,
                                           synchronization_epoch: str) -> IndependentUtcMeasurement:
     """Internal authority adapter factory; not a UI/API input surface."""
     return IndependentUtcMeasurement(
-        source, source_identity, utc_seconds, uncertainty_seconds,
+        source, source_identity, host_identity, utc_seconds, uncertainty_seconds,
         measured_monotonic_ns, expires_monotonic_ns, synchronization_epoch,
         _AUTHORITY_ISSUER,
     )
@@ -48,10 +50,14 @@ def _verified_independent_utc_measurement(*, source: str, source_identity: str,
 class ReadOnlyUtcEvidenceCollector:
     """Binds a continuous UTC-measurement chain to one verified DEMO account."""
 
-    def __init__(self, account_binding: str, *, max_uncertainty_seconds: float = .25):
+    def __init__(self, account_binding: str, host_identity: str,
+                 *, max_uncertainty_seconds: float = .25):
         if not isinstance(account_binding, str) or not account_binding:
             raise ValueError("account_binding is required")
+        if not isinstance(host_identity, str) or not host_identity:
+            raise ValueError("host_identity is required")
         self._account_binding = account_binding
+        self._host_identity = host_identity
         self._max_uncertainty_seconds = max_uncertainty_seconds
         self._source_identity: str | None = None
         self._sync_epoch: str | None = None
@@ -69,7 +75,9 @@ class ReadOnlyUtcEvidenceCollector:
         if self._invalidated or measurement is None or measurement._issuer is not _AUTHORITY_ISSUER:
             return None
         if (not all(isinstance(value, str) and value for value in
-                    (measurement.source, measurement.source_identity, measurement.synchronization_epoch))
+                    (measurement.source, measurement.source_identity, measurement.host_identity,
+                     measurement.synchronization_epoch))
+                or measurement.host_identity != self._host_identity
                 or not all(type(value) in (int, float) and math.isfinite(value) for value in
                            (measurement.utc_seconds, measurement.uncertainty_seconds))
                 or measurement.uncertainty_seconds < 0
@@ -101,6 +109,7 @@ class ReadOnlyUtcEvidenceCollector:
             monotonic_ns=measurement.measured_monotonic_ns,
             expires_monotonic_ns=measurement.expires_monotonic_ns,
             account_binding=self._account_binding,
+            host_identity=self._host_identity,
             source_identity=measurement.source_identity,
             sync_epoch=measurement.synchronization_epoch,
             observation_sequence=self._sequence,

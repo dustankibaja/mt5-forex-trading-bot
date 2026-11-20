@@ -106,7 +106,7 @@ def test_controlled_utc_evidence_is_bound_to_the_verified_account(session, tmp_p
     evidence = _verified_utc_evidence(
         source="fixture-authority", utc_seconds=1_000., uncertainty_seconds=.05,
         monotonic_ns=now, expires_monotonic_ns=now + 1_000,
-        account_binding="wrong-binding", source_identity="fixture-source",
+        account_binding="wrong-binding", host_identity="fixture-host", source_identity="fixture-source",
         sync_epoch="fixture-epoch", observation_sequence=1,
     )
     adapter.record_equity(journal, utc_evidence=evidence)
@@ -122,7 +122,7 @@ def test_expired_utc_evidence_leaves_risk_record_incomplete(session, tmp_path, m
     evidence = _verified_utc_evidence(
         source="fixture-authority", utc_seconds=1_000., uncertainty_seconds=.05,
         monotonic_ns=now - 2, expires_monotonic_ns=now - 1,
-        account_binding=adapter._identity(), source_identity="fixture-source",
+        account_binding=adapter._identity(), host_identity="fixture-host", source_identity="fixture-source",
         sync_epoch="fixture-epoch", observation_sequence=1,
     )
     adapter.record_equity(journal, utc_evidence=evidence)
