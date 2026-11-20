@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse,csv,hashlib,json,sys
 from pathlib import Path
 from src.product.historical_backtest import CostModel,run
+from src.product.simulation_report import build as build_report
 from src.product.strategy_spec import validate_strategy
 
 CONTRACT_VERSION="1.0.0"
@@ -42,7 +43,7 @@ def main()->int:
             start,end=req.get("start_date"),req.get("end_date")
             selected=[r for r in rows if (not start or r["timestamp"][:10]>=start) and (not end or r["timestamp"][:10]<=end)]
             if len(selected)<3:raise ValueError("selected date range has insufficient completed candles")
-            costs=CostModel(**(req.get("cost_model") or {}));result=run(strategy,rows,initial_balance=req.get("initial_balance"),dataset=ds,costs=costs,trade_start=start,trade_end=end);result["contract_version"]=CONTRACT_VERSION
+            costs=CostModel(**(req.get("cost_model") or {}));result=run(strategy,rows,initial_balance=req.get("initial_balance"),dataset=ds,costs=costs,trade_start=start,trade_end=end);result["report"]=build_report(result);result["contract_version"]=CONTRACT_VERSION
         print(json.dumps(result,sort_keys=True,separators=(",",":"),allow_nan=False));return 0
     except Exception as error:
         print(json.dumps({"contract_version":CONTRACT_VERSION,"error":str(error),"execution_enabled":False}),file=sys.stderr);return 2

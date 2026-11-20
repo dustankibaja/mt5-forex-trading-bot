@@ -13,6 +13,14 @@ class CostModel:
     contract_size:float=100000.; leverage:float=30.; minimum_lot:float=.01; lot_step:float=.01; maximum_lot:float=100.
 
 def _hash(v:Any)->str:return hashlib.sha256(json.dumps(v,sort_keys=True,separators=(",",":"),default=str).encode()).hexdigest()
+def _content_fingerprint(result:dict[str,Any])->str:
+    """Hash reproducible simulation content, deliberately excluding run identity."""
+    copied=json.loads(json.dumps(result,sort_keys=True,default=str))
+    manifest=copied.get("manifest",{})
+    manifest.pop("run_id",None)
+    manifest.pop("simulation_content_fingerprint",None)
+    manifest.pop("simulation_result_hash",None)
+    return _hash(copied)
 def _finite(v:Any,name:str,*,positive=False,nonnegative=False)->float:
     if isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(float(v)):raise ValueError(f"{name} must be finite")
     x=float(v)
@@ -101,5 +109,5 @@ def run(strategy_raw:dict[str,Any],rows:list[dict[str,Any]],*,initial_balance:fl
     wins=[t for t in trades if t["net_pnl"]>0];losses=[t for t in trades if t["net_pnl"]<0];gp=sum(t["net_pnl"] for t in wins);gl=-sum(t["net_pnl"] for t in losses)
     metrics={"realized_balance":balance,"realized_pnl":balance-initial_balance,"unrealized_pnl":unrealized,"ending_equity":total,"net_profit":total-initial_balance,"return_percent":(total/initial_balance-1)*100,"closed_trades":len(trades),"winning_trades":len(wins),"losing_trades":len(losses),"win_rate_percent":len(wins)/len(trades)*100 if trades else None,"profit_factor":gp/gl if gl else None,"maximum_drawdown_percent":max_dd*100,"average_trade":sum(t["net_pnl"] for t in trades)/len(trades) if trades else None,"trading_costs":sum(t["commission"]+t["financing"] for t in trades),"open_positions":1 if position else 0}
     warnings=(["Fewer than 30 completed trades; results are statistically weak."] if len(trades)<30 else [])+["Same-bar stop/target ambiguity is resolved adversely at the stop.","Contract, leverage, financing and commission assumptions are user supplied and not verified by the dataset."]
-    manifest={"strategy_id":strategy["strategy_id"],"strategy_version":strategy["version"],"strategy_hash":strategy["configuration_hash"],"dataset":dataset,"date_range":[candles[0]["timestamp"],candles[-1]["timestamp"]],"evaluation_range":[trade_start,trade_end],"warmup_policy":"pre-start candles initialize indicators; entries are prohibited before selected start","execution_model":MODEL_VERSION,"cost_model":asdict(costs),"timestamp_convention":"UTC completed-candle open timestamps; session start inclusive/end exclusive","run_id":str(uuid.uuid4()),"warnings":warnings}
-    result={"metrics":metrics,"trades":trades,"open_position":position,"rejected_signals":rejected,"order_intents":intents,"equity_curve":equity,"manifest":manifest,"execution_enabled":False};manifest["simulation_result_hash"]=_hash(result);return result
+    manifest={"simulation_kind":"HISTORICAL_SIMULATION","strategy_id":strategy["strategy_id"],"strategy_name":strategy["name"],"strategy_version":strategy["version"],"strategy_hash":strategy["configuration_hash"],"symbol":strategy["symbol"],"timeframe":strategy["timeframe"],"dataset":dataset,"date_range":[candles[0]["timestamp"],candles[-1]["timestamp"]],"evaluation_range":[trade_start,trade_end],"warmup_policy":"pre-start candles initialize indicators; entries are prohibited before selected start","execution_model":MODEL_VERSION,"cost_model":asdict(costs),"timestamp_convention":"UTC completed-candle open timestamps; session start inclusive/end exclusive","run_id":str(uuid.uuid4()),"warnings":warnings}
+    result={"simulation_label":"HISTORICAL SIMULATION — NOT BROKER EXECUTION","metrics":metrics,"trades":trades,"open_position":position,"rejected_signals":rejected,"order_intents":intents,"equity_curve":equity,"manifest":manifest,"execution_enabled":False};manifest["simulation_content_fingerprint"]=_content_fingerprint(result);manifest["simulation_result_hash"]=manifest["simulation_content_fingerprint"];return result
