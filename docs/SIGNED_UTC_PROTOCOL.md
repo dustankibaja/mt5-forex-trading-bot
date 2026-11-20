@@ -10,14 +10,17 @@ synchronization epoch, challenge, UTC assertion and uncertainty. The host
 records send and receipt monotonic timestamps separately; they are never
 authority-signed facts.
 
-The host accepts a receipt only after a reviewed cryptographic provider verifies
+The host durably registers each challenge before sending it. It accepts a receipt only after a reviewed cryptographic provider verifies
 the signature against the authority-to-pinned-key mapping, the local
-request/receipt interval is within policy, the challenge is unused in the
+request/receipt interval is within policy, the response matches that issued
+authority/host/epoch challenge before expiry, the challenge is unused in the
 durable replay database, and the assertion has finite bounded uncertainty.
 Ordinary NTP, endpoint labels, TLS alone, source labels and private fixture
 factories are not authority authentication.
 
-At least two signed, independently operated source families with overlapping
+For conservative timing, the calibration treats the *full* local
+request-to-receipt interval as timing uncertainty (not half the RTT), covering
+unknown server placement and asymmetric network delay. At least two signed, independently operated source families with overlapping
 intervals are required. Calibration is derived from those exact verified
 receipts; callers cannot pair an unrelated `Calibration` object with them.
 Permanent provenance uses `authority:key-fingerprint`; changing transcript

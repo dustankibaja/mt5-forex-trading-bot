@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import math
+import secrets
 
 
 _VERIFIED_TRANSCRIPT_ISSUER = object()
@@ -48,6 +49,16 @@ class HostReceipt:
 
 
 @dataclass(frozen=True)
+class HostChallenge:
+    authority_id: str
+    host_identity: str
+    synchronization_epoch: str
+    challenge: str
+    issued_monotonic_ns: int
+    expires_monotonic_ns: int
+
+
+@dataclass(frozen=True)
 class VerifiedUtcTranscript:
     receipt: HostReceipt
     transcript_digest: str
@@ -74,10 +85,34 @@ class ApprovedHostSignedUtcVerifier:
         self._db = replay_db
         self._verify_detached = verify_detached
         self._max_network_delay_ns = max_network_delay_ns
+        self._db.execute("""CREATE TABLE IF NOT EXISTS issued_utc_challenges(
+            challenge_digest TEXT PRIMARY KEY, authority_id TEXT NOT NULL,
+            host_identity TEXT NOT NULL, synchronization_epoch TEXT NOT NULL,
+            issued_monotonic_ns INTEGER NOT NULL, expires_monotonic_ns INTEGER NOT NULL)""")
         self._db.execute("""CREATE TABLE IF NOT EXISTS consumed_utc_challenges(
-            authority_id TEXT NOT NULL, challenge_digest TEXT NOT NULL,
+            challenge_digest TEXT PRIMARY KEY, authority_id TEXT NOT NULL,
+            host_identity TEXT NOT NULL, synchronization_epoch TEXT NOT NULL,
             consumed_monotonic_ns INTEGER NOT NULL,
-            PRIMARY KEY(authority_id, challenge_digest))""")
+            FOREIGN KEY(challenge_digest) REFERENCES issued_utc_challenges(challenge_digest))""")
+
+    def issue_challenge(self, *, authority_id: str, synchronization_epoch: str,
+                        issued_monotonic_ns: int, ttl_ns: int,
+                        challenge: str | None = None) -> HostChallenge:
+        """Durably register a host challenge before sending it to an authority."""
+        if (authority_id not in self._authority_keys or not synchronization_epoch
+                or type(issued_monotonic_ns) is not int or type(ttl_ns) is not int or ttl_ns <= 0):
+            raise ValueError("valid authority, epoch, monotonic issue time and TTL are required")
+        value = challenge or secrets.token_urlsafe(32)
+        if not isinstance(value, str) or not value:
+            raise ValueError("challenge is required")
+        expires = issued_monotonic_ns + ttl_ns
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+        with self._db:
+            self._db.execute("INSERT INTO issued_utc_challenges VALUES(?,?,?,?,?,?)", (
+                digest, authority_id, self._host_identity, synchronization_epoch,
+                issued_monotonic_ns, expires))
+        return HostChallenge(authority_id, self._host_identity, synchronization_epoch,
+                             value, issued_monotonic_ns, expires)
 
     def verify(self, receipt: HostReceipt | None) -> VerifiedUtcTranscript | None:
         if receipt is None or receipt.host_identity != self._host_identity:
@@ -100,9 +135,22 @@ class ApprovedHostSignedUtcVerifier:
             return None
         challenge_digest = hashlib.sha256(assertion.challenge.encode("utf-8")).hexdigest()
         try:
-            self._db.execute("INSERT INTO consumed_utc_challenges VALUES(?,?,?)", (
-                assertion.authority_id, challenge_digest, receipt.received_monotonic_ns))
+            self._db.execute("BEGIN IMMEDIATE")
+            issued = self._db.execute("""SELECT authority_id,host_identity,synchronization_epoch,
+                issued_monotonic_ns,expires_monotonic_ns FROM issued_utc_challenges WHERE challenge_digest=?""",
+                                      (challenge_digest,)).fetchone()
+            if (issued is None or issued[:3] != (assertion.authority_id, self._host_identity,
+                                                  assertion.synchronization_epoch)
+                    or not issued[3] <= receipt.sent_monotonic_ns <= receipt.received_monotonic_ns <= issued[4]):
+                self._db.execute("ROLLBACK")
+                return None
+            self._db.execute("INSERT INTO consumed_utc_challenges VALUES(?,?,?,?,?)", (
+                challenge_digest, assertion.authority_id, self._host_identity,
+                assertion.synchronization_epoch, receipt.received_monotonic_ns))
+            self._db.execute("COMMIT")
         except Exception:
+            if self._db.in_transaction:
+                self._db.execute("ROLLBACK")
             return None
         digest = hashlib.sha256(payload + assertion.signature + str(receipt.sent_monotonic_ns).encode()
                                 + str(receipt.received_monotonic_ns).encode()).hexdigest()

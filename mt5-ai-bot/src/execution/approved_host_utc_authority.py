@@ -71,7 +71,10 @@ def reference_set_from_verified_transcripts(*, host_identity: str,
             ReferenceObservation(assertion.authority_id, assertion.source_family,
                                  receipt.received_monotonic_ns / 1_000_000,
                                  assertion.utc_seconds * 1000, 0.0,
-                                 (receipt.received_monotonic_ns - receipt.sent_monotonic_ns) / 1_000_000,
+                                 # ``calibrate`` halves round_trip_ms. Supply twice the
+                                 # elapsed request/response time so unknown asymmetric
+                                 # delay is bounded by the full local interval.
+                                 2 * (receipt.received_monotonic_ns - receipt.sent_monotonic_ns) / 1_000_000,
                                  assertion.uncertainty_seconds * 1000)
             for receipt, assertion in zip(raw, assertions)], maximum_age_ms=maximum_age_ms,
             drift_bound_ppm=drift_bound_ppm)
